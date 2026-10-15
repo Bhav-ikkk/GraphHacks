@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
+from edl.change import ChangeError
 from edl.engine import Engine
 from edl.ingest import IngestError
 from edl.policy import PolicyError
@@ -36,6 +37,17 @@ class ReviewIn(BaseModel):
 class IngestIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     target: str = Field(min_length=1)
+    base: str | None = None
+    head: str | None = None
+    files: list[str] | None = None
+
+
+class ScopeIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    base: str | None = None
+    head: str | None = None
+    files: list[str] | None = None
+    title: str | None = None
 
 
 class ActionIn(BaseModel):
@@ -65,10 +77,28 @@ def ingest_repo(body: IngestIn) -> dict:
     if _rejects_query(body.target):
         raise HTTPException(status_code=400, detail="Free-text Cypher is rejected. Only named tools run.")
     try:
-        summary = engine.use_repository(body.target)
+        summary = engine.use_repository(
+            body.target,
+            base=body.base,
+            head=body.head,
+            files=body.files,
+        )
     except IngestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {**summary, "snapshot": engine.snapshot()}
+
+
+@app.post("/api/change")
+def scope_change(body: ScopeIn) -> dict:
+    try:
+        return engine.scope_change(
+            base=body.base,
+            head=body.head,
+            files=body.files,
+            title=body.title,
+        )
+    except ChangeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/review")

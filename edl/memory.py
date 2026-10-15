@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 
 class MemoryGraph:
     def __init__(self) -> None:
@@ -51,3 +53,10 @@ class MemoryGraph:
 
     def counts(self) -> tuple[int, int]:
         return len(self.nodes), len(self.edges)
+
+    def revision(self) -> str:
+        """Deterministic fingerprint of the current nodes and edges."""
+        parts = sorted(self.nodes.keys())
+        edges = sorted(f"{edge['src']}|{edge['rel']}|{edge['dst']}" for edge in self.edges)
+        raw = "\n".join(parts) + "\n" + "\n".join(edges)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]

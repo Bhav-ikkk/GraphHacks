@@ -1,9 +1,0 @@
-services:
-  checkout:
-    image: scratch
-    depends_on:
-      - payments
-  payments:
-    image: scratch
-  search:
-    image: scratch

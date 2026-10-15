@@ -1,11 +1,14 @@
-"""Process-wide engine: a repository you choose, reviews, and actions."""
+"""Process-wide engine: a repository you choose, one scoped change, reviews, and actions."""
 
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
+from edl import change as change_scope
 from edl import falkor, gate, ingest
+from edl.change import ChangeError
 from edl.memory import MemoryGraph
 from edl.models import MODES
 from edl.policy import PolicyError, load_policy
@@ -22,28 +25,125 @@ class Engine:
         self.dataset = "empty"
         self.origin: dict | None = None
         self.note = "Paste a GitHub URL or a folder path. Nothing is loaded until you do."
+        self.ci_configured = False
+        self.scope_note = "No change is scoped yet."
         self.records: dict[str, dict] = {}
         self.issued: dict[str, dict] = {}
         self.issue_seq = 0
+        self._lock = threading.Lock()
 
-    def use_repository(self, target: str) -> dict:
-        graph, changes, summary = ingest.ingest(target)
+    def use_repository(
+        self,
+        target: str,
+        *,
+        base: str | None = None,
+        head: str | None = None,
+        files: list[str] | None = None,
+    ) -> dict:
+        with self._lock:
+            return self._use_repository(target, base=base, head=head, files=files)
+
+    def _use_repository(
+        self,
+        target: str,
+        *,
+        base: str | None = None,
+        head: str | None = None,
+        files: list[str] | None = None,
+    ) -> dict:
+        graph, summary = ingest.ingest(target)
         self.graph = graph
-        self.changes = changes
+        self.changes = []
         self.dataset = "repository"
         self.origin = summary["origin"]
         self.note = summary["note"]
+        self.ci_configured = bool(summary.get("ci_configured"))
         self.issued = {}
+        self.scope_note = "No change is scoped yet."
+        scope_error = None
+        try:
+            self._scope_change(base=base, head=head, files=files)
+        except ChangeError as exc:
+            scope_error = str(exc)
+            self.scope_note = scope_error
         nodes, edges = self.graph.counts()
         falkor.publish(self.graph)
         return {
             "dataset": self.dataset,
             "origin": self.origin,
             "note": self.note,
+            "scope_note": self.scope_note,
+            "scope_error": scope_error,
             "nodes": nodes,
             "edges": edges,
             "changes": len(self.changes),
             "services": self.services(),
+        }
+
+    def scope_change(
+        self,
+        *,
+        base: str | None = None,
+        head: str | None = None,
+        files: list[str] | None = None,
+        title: str | None = None,
+    ) -> dict:
+        with self._lock:
+            scoped = self._scope_change(base=base, head=head, files=files, title=title)
+            falkor.publish(self.graph)
+            return scoped
+
+    def _scope_change(
+        self,
+        *,
+        base: str | None = None,
+        head: str | None = None,
+        files: list[str] | None = None,
+        title: str | None = None,
+    ) -> dict:
+        if self.dataset != "repository" or self.origin is None:
+            raise ChangeError("Analyze a repository before scoping a change.")
+
+        explicit = [path.strip() for path in (files or []) if path and path.strip()]
+        source = "files"
+        if explicit:
+            paths = explicit
+            source = "files"
+        elif self.origin.get("kind") == "path":
+            paths, source = change_scope.list_changed_files(
+                Path(self.origin["value"]),
+                base=base,
+                head=head,
+            )
+        elif base or head:
+            raise ChangeError(
+                "Git base/head scoping needs a local folder. "
+                "For a GitHub URL, pass explicit files, or clone the repo and analyze the folder."
+            )
+        else:
+            raise ChangeError(
+                "No change scope yet. For a local git folder the working tree or HEAD~1..HEAD "
+                "is used automatically when present. Otherwise pass files, or base and head."
+            )
+
+        change = change_scope.build_scoped_change(
+            self.graph,
+            paths,
+            base=base,
+            head=head,
+            source=source,
+            ci_configured=self.ci_configured,
+            title=title,
+        )
+        change_scope.attach_change_node(self.graph, change)
+        self.changes = [change]
+        self.issued = {}
+        self.scope_note = change.get("note") or "Change scoped."
+        return {
+            "change": _public_change(change),
+            "scope_note": self.scope_note,
+            "changes": len(self.changes),
+            "snapshot": self.snapshot(),
         }
 
     def services(self) -> list[dict]:
@@ -81,6 +181,10 @@ class Engine:
         raise KeyError(change_id)
 
     def review(self, change_id: str, mode: str = "full") -> dict:
+        with self._lock:
+            return self._review(change_id, mode)
+
+    def _review(self, change_id: str, mode: str = "full") -> dict:
         if mode not in MODES:
             raise ValueError(f"mode must be one of {', '.join(MODES)}")
         try:
@@ -95,6 +199,10 @@ class Engine:
         return {"active": mode, "runs": runs}
 
     def act(self, change_id: str, mode: str = "full") -> dict:
+        with self._lock:
+            return self._act(change_id, mode)
+
+    def _act(self, change_id: str, mode: str = "full") -> dict:
         change = self.change(change_id)
         record = review_change(self.graph, change, self.policy, mode, writeback=False)
         outcome = gate.execute(record, change, self.issued)
@@ -117,11 +225,13 @@ class Engine:
                 "change_id": public["change_id"],
                 "mode": public["mode"],
                 "policy_version": public["policy_version"],
+                "graph_revision": public.get("graph_revision"),
+                "evidence_count": len(public.get("evidence") or []),
                 "source": "edl",
                 "evidence_type": "observed",
             }
         )
-        change_node = f"change:{public['change_id']}"
+        change_node = change["id"] if str(change["id"]).startswith("change:") else f"change:{change['id']}"
         if self.graph.node(change_node) is None:
             self.graph.add_node(
                 {
@@ -151,23 +261,29 @@ class Engine:
             "dataset": self.dataset,
             "origin": self.origin,
             "note": self.note,
+            "scope_note": self.scope_note,
             "nodes": nodes,
             "edges": edges,
             "policy_version": self.policy.get("version"),
-            "changes": [
-                {
-                    "id": change["id"],
-                    "title": change.get("title"),
-                    "expected": change.get("expected"),
-                    "gn": change.get("gn", False),
-                    "note": change.get("note"),
-                    "symbols": change.get("symbols", []),
-                }
-                for change in self.changes
-            ],
+            "changes": [_public_change(change) for change in self.changes],
             "services": self.services(),
             "modes": list(MODES),
         }
+
+
+def _public_change(change: dict) -> dict:
+    return {
+        "id": change["id"],
+        "title": change.get("title"),
+        "expected": change.get("expected"),
+        "gn": change.get("gn", False),
+        "note": change.get("note"),
+        "symbols": change.get("symbols", []),
+        "files": change.get("files", []),
+        "mapping": change.get("mapping"),
+        "unresolved_refs": change.get("unresolved_refs", []),
+        "scope": change.get("scope"),
+    }
 
 
 def _fail_closed(change_id: str, mode: str, reason: str) -> dict:
@@ -180,7 +296,10 @@ def _fail_closed(change_id: str, mode: str, reason: str) -> dict:
         "claims": [{"text": reason, "evidence_id": "ev-policy", "policy": "POLICY_FILE"}],
         "findings": [],
         "triggered": ["POLICY_FILE"],
+        "evidence": [],
         "missing": [{"policy": "POLICY_FILE", "detail": reason, "evidence_id": "ev-policy"}],
+        "policy_version": None,
+        "graph_revision": None,
         "tool_calls": [],
         "graph": {"nodes": [], "edges": []},
         "injection": [],

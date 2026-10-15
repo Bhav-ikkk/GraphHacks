@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from edl.evidence import assemble_evidence, catalog_ids, reject_claim, validate_decision_record
 from edl.memory import MemoryGraph
 from edl.models import NOW
 from edl import queries
@@ -32,14 +33,17 @@ def review_change(
     injection = _injection(change.get("description", ""))
     evidence = _evaluate(working, change, policy, mode, trace, now)
     decision = decide(evidence, policy)
+    commit = change.get("commit", f"sha-{change['id'].lower()}")
+    evidence_records = assemble_evidence(evidence, decision, now=now, commit=commit)
+    catalog = catalog_ids(evidence_records)
     claims = _claims(decision, evidence)
-    claims, rejected = _drop_unknown_claims(claims, evidence)
+    claims, rejected = reject_claim(claims, catalog)
     record_id = f"dec:{change['id']}:{mode}:{_stamp()}"
     record = {
         "id": record_id,
         "change_id": change["id"],
         "title": change.get("title", change["id"]),
-        "commit": change.get("commit", f"sha-{change['id'].lower()}"),
+        "commit": commit,
         "mode": mode,
         "state": decision["state"],
         "rationale": _rationale(decision),
@@ -47,8 +51,10 @@ def review_change(
         "rejected_claims": rejected,
         "findings": decision["findings"],
         "triggered": decision["triggered"],
+        "evidence": evidence_records,
         "missing": decision["missing"],
         "policy_version": decision["policy_version"],
+        "graph_revision": working.revision(),
         "tool_calls": trace,
         "injection": injection,
         "graph": _view(evidence, decision),
@@ -58,6 +64,9 @@ def review_change(
         "routes": evidence.get("routes", []),
         "note": change.get("note"),
     }
+    contract_errors = validate_decision_record(record)
+    record["contract_ok"] = not contract_errors
+    record["contract_errors"] = contract_errors
     if writeback:
         _write_back(working, record)
         record["written_back"] = True
@@ -116,11 +125,12 @@ def _evaluate(graph, change, policy, mode, trace, now) -> dict:
     graph_on = mode != "graph_off"
     mapping = change.get("mapping", "resolved")
     functions = []
-    if mapping == "resolved":
-        for symbol in change.get("symbols", []):
-            node = graph.node(f"fn:{symbol}")
-            if node:
-                functions.append(node)
+    # Always resolve declared symbols. mapping (resolved/partial/unresolved) is about
+    # whether every modified path mapped; it must not hide known symbols.
+    for symbol in change.get("symbols", []):
+        node = graph.node(f"fn:{symbol}")
+        if node:
+            functions.append(node)
     claimed = _services_from_paths(change.get("files", []))
     shared_name = any("utils" in name or name.startswith("shared") for name in claimed) or any(
         "/shared/" in path for path in change.get("files", [])
@@ -552,29 +562,6 @@ def _claims(decision: dict, evidence: dict) -> list[dict]:
     return claims
 
 
-def _drop_unknown_claims(claims: list[dict], evidence: dict) -> tuple[list[dict], list[dict]]:
-    catalog = {claim["evidence_id"] for claim in claims}
-    catalog.add("ev-clear")
-    kept = []
-    rejected = []
-    for claim in claims:
-        if claim["evidence_id"] in catalog:
-            kept.append(claim)
-        else:
-            rejected.append(claim)
-    return kept, rejected
-
-
-def reject_claim(claims: list[dict], catalog: set[str]) -> tuple[list[dict], list[dict]]:
-    kept, rejected = [], []
-    for claim in claims:
-        if claim.get("evidence_id") in catalog:
-            kept.append(claim)
-        else:
-            rejected.append(claim)
-    return kept, rejected
-
-
 def _view(evidence: dict, decision: dict) -> dict:
     nodes = []
     edges = []
@@ -653,6 +640,8 @@ def _write_back(graph: MemoryGraph, record: dict) -> None:
             "change_id": record["change_id"],
             "mode": record["mode"],
             "policy_version": record["policy_version"],
+            "graph_revision": record.get("graph_revision"),
+            "evidence_count": len(record.get("evidence") or []),
             "source": "edl",
             "evidence_type": "observed",
             "observed_at": datetime.now(timezone.utc).isoformat(),

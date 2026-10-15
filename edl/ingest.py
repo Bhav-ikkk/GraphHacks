@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import yaml
@@ -34,11 +36,14 @@ SKIP_DIRS = {
 }
 IGNORE_AS_SERVICE = SKIP_DIRS | {".github"}
 CODE_MARKERS = ("Dockerfile", "dockerfile", "go.mod", "package.json", "pyproject.toml", "pom.xml", "Cargo.toml")
+COMPOSE_NAMES = {"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}
 SERVICE_ROOTS = {"services", "apps", "packages", "cmd"}
 CODEOWNERS_PATHS = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
 SOURCE_SUFFIXES = (".py", ".go", ".js", ".ts", ".tsx", ".jsx", ".proto")
 OBSERVED_AT = "2026-10-15T12:00:00Z"
-MAX_REMOTE_SOURCES = 12
+MAX_REMOTE_SOURCES = 80
+ROOT_SERVICE = "__repo__"
+ROOT_SOURCE_DIRS = {"src", "lib", "app", "internal"}
 
 
 class IngestError(Exception):
@@ -58,7 +63,8 @@ def parse_target(value: str) -> tuple[str, str]:
     )
 
 
-def ingest(value: str) -> tuple[MemoryGraph, list[dict], dict]:
+def ingest(value: str) -> tuple[MemoryGraph, dict]:
+    """Build the structural graph for a repository. Does not invent a change."""
     kind, target = parse_target(value)
     if kind == "path":
         detected = detect_local(Path(target))
@@ -69,28 +75,25 @@ def ingest(value: str) -> tuple[MemoryGraph, list[dict], dict]:
         detected["origin"] = {"kind": "github", "value": target}
     if not detected["services"]:
         raise IngestError(
-            "No services showed up in that tree. Looked for a compose file, Dockerfiles, "
+            "No services showed up in that tree. Looked for a compose file, a Dockerfile, "
+            "a project manifest (package.json, pyproject.toml, go.mod, Cargo.toml, pom.xml), "
             "and folders under services/, apps/, packages/, or cmd/."
         )
-    graph, changes = build_graph(detected)
+    graph = build_graph(detected)
     summary = {
         "origin": detected["origin"],
         "service_count": len(detected["services"]),
         "dependency_count": len(detected["depends"]),
         "owner_rules": len(detected.get("codeowners") or []),
         "ci_configured": bool(detected.get("ci_configured")),
-        "note": (
-            "Services, dependencies, CODEOWNERS, test files, and function names come from the repository. "
-            "A test file is recorded as not-run. CI run results, deployment health, incidents, and tiers "
-            "are not in the git tree, so they are left missing."
-        ),
+        "note": _note(detected),
     }
-    return graph, changes, summary
+    return graph, summary
 
 
 def detect_local(root: Path) -> dict:
     paths: list[str] = []
-    compose = None
+    compose_parts: list[dict] = []
     functions: dict[str, list[str]] = {}
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [
@@ -101,14 +104,15 @@ def detect_local(root: Path) -> dict:
             rel = (folder / filename).relative_to(root).as_posix()
             paths.append(rel)
             file_path = folder / filename
-            if filename in {"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"} and compose is None:
-                compose = _compose_from_text(file_path.read_text(encoding="utf-8", errors="ignore"))
+            if filename in COMPOSE_NAMES:
+                compose_parts.append(_compose_from_text(file_path.read_text(encoding="utf-8", errors="ignore")))
             if filename.endswith(SOURCE_SUFFIXES) and not _looks_like_test(rel):
                 text = _read_limited(file_path)
                 found = _scan_functions(filename, text)
                 if found:
                     functions[rel] = found
-    detected = _assemble(paths, compose, functions)
+    detected = _assemble(paths, _merge_compose(compose_parts), functions)
+    _bind_repo_service(detected, root.name)
     detected["codeowners"] = _read_local_codeowners(root)
     detected["ci_configured"] = _ci_configured(paths)
     detected["test_paths"] = [path for path in paths if _looks_like_test(path)]
@@ -122,16 +126,16 @@ def detect_github(owner: str, name: str) -> dict:
         f"https://api.github.com/repos/{owner}/{name}/git/trees/{branch}?recursive=1"
     )
     paths = [item["path"] for item in tree.get("tree", []) if item.get("type") == "blob"]
-    compose = None
-    for path in paths:
-        base = path.rsplit("/", 1)[-1]
-        if base in {"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}:
-            raw = _github_text(f"https://raw.githubusercontent.com/{owner}/{name}/{branch}/{path}")
-            compose = _compose_from_text(raw)
-            break
-    detected = _assemble(paths, compose, {})
+    compose_parts = []
+    for path in _compose_paths(paths):
+        raw = _github_text_optional(f"https://raw.githubusercontent.com/{owner}/{name}/{branch}/{path}")
+        if raw:
+            compose_parts.append(_compose_from_text(raw))
+    detected = _assemble(paths, _merge_compose(compose_parts), {})
+    _bind_repo_service(detected, name)
     functions = _github_functions(owner, name, branch, paths, detected["services"])
     _merge_functions(detected["services"], functions)
+    detected["truncated"] = bool(tree.get("truncated"))
     detected["license"] = (meta.get("license") or {}).get("spdx_id")
     detected["branch"] = branch
     detected["codeowners"] = _github_codeowners(owner, name, branch, paths)
@@ -159,7 +163,7 @@ def _assemble(paths: list[str], compose: dict | None, functions: dict[str, list[
     services: dict[str, dict] = {}
 
     def ensure(name: str) -> dict:
-        key = _slug(name)
+        key = ROOT_SERVICE if name == ROOT_SERVICE else _slug(name)
         if not key or key in IGNORE_AS_SERVICE:
             return services.setdefault("_skip", {"name": "_skip", "paths": [], "functions": []})
         services.setdefault(key, {"name": key, "paths": [], "functions": []})
@@ -179,8 +183,12 @@ def _assemble(paths: list[str], compose: dict | None, functions: dict[str, list[
             continue
         base = parts[-1]
         if base in CODE_MARKERS or base == "Dockerfile":
-            parent = parts[-2] if len(parts) > 1 else _slug(base)
-            ensure(parent)["paths"].append(path)
+            if len(parts) == 1:
+                bucket = ensure(ROOT_SERVICE)
+                bucket["root"] = True
+            else:
+                bucket = ensure(parts[-2])
+            bucket["paths"].append(path)
         if len(parts) >= 2 and parts[-2] in SERVICE_ROOTS and "." not in parts[-1]:
             ensure(parts[-1])
         for index, part in enumerate(parts[:-1]):
@@ -201,8 +209,23 @@ def _assemble(paths: list[str], compose: dict | None, functions: dict[str, list[
         for name, count in top.items():
             if count:
                 ensure(name)
+        root_files = [
+            path
+            for path in paths
+            if "/" not in path and path.endswith(SOURCE_SUFFIXES) and not _looks_like_test(path)
+        ]
+        if root_files:
+            bucket = ensure(ROOT_SERVICE)
+            bucket["root"] = True
+            for path in root_files:
+                if path not in bucket["paths"]:
+                    bucket["paths"].append(path)
 
-    ordered = [service for service in list(services.values())[:40] if service["name"] != "_skip"]
+    ranked = sorted(
+        (service for service in services.values() if service["name"] != "_skip"),
+        key=lambda service: (0 if service["paths"] or service["functions"] else 1, service["name"]),
+    )
+    ordered = ranked[:60]
     for path, names in functions.items():
         service = _service_for_path(ordered, path)
         if service is None:
@@ -227,7 +250,8 @@ def _assemble(paths: list[str], compose: dict | None, functions: dict[str, list[
     return {"services": ordered, "depends": depends}
 
 
-def build_graph(detected: dict) -> tuple[MemoryGraph, list[dict]]:
+def build_graph(detected: dict) -> MemoryGraph:
+    """Structural graph only. A Change is created later by edl.change scope."""
     graph = MemoryGraph()
     origin = detected.get("origin", {})
     repo_name = origin.get("value", "selected-repo")
@@ -247,8 +271,6 @@ def build_graph(detected: dict) -> tuple[MemoryGraph, list[dict]]:
 
     rules = detected.get("codeowners") or []
     test_paths = detected.get("test_paths") or []
-    ci_configured = bool(detected.get("ci_configured"))
-    changes = []
     for service in detected["services"]:
         name = service["name"]
         graph.add_node(
@@ -263,6 +285,7 @@ def build_graph(detected: dict) -> tuple[MemoryGraph, list[dict]]:
                 "method": "tree-scan",
                 "observed_at": OBSERVED_AT,
                 "confidence": 1,
+                "root": bool(service.get("root")),
             }
         )
         graph.add_edge(f"svc:{name}", "IN_REPO", "repo:selected", source="repository", evidence_type="observed")
@@ -305,29 +328,6 @@ def build_graph(detected: dict) -> tuple[MemoryGraph, list[dict]]:
                     }
                 )
                 graph.add_edge(f"test:{symbol}", "COVERS", fid, source="repository", evidence_type="observed")
-            note = None
-            if granularity == "service":
-                note = "No function names were found. This review is of the service folder."
-            changes.append(
-                {
-                    "id": f"repo:{symbol}",
-                    "title": symbol,
-                    "symbols": [symbol],
-                    "files": service["paths"][:5] or [f"{name}/"],
-                    "description": f"Review {symbol} from the repository you selected.",
-                    "ci": {"present": False, "result": None, "age_hours": None, "configured": ci_configured},
-                    "designated_approval": False,
-                    "approver": None,
-                    "mapping": "resolved",
-                    "dependency": None,
-                    "unresolved_refs": [],
-                    "text_mentions_incident": False,
-                    "intent": None,
-                    "authorized": True,
-                    "ticketing": "ok",
-                    "note": note,
-                }
-            )
 
     for consumer, dependency in detected["depends"]:
         graph.add_edge(
@@ -337,7 +337,7 @@ def build_graph(detected: dict) -> tuple[MemoryGraph, list[dict]]:
             evidence_type="observed",
             source="repository",
         )
-    return graph, changes
+    return graph
 
 
 def parse_codeowners(text: str) -> list[dict]:
@@ -410,12 +410,55 @@ def _rule_matches(pattern: str, path: str) -> bool:
     return path == token or path.startswith(token.rstrip("/") + "/")
 
 
+def _bind_repo_service(detected: dict, repo_name: str) -> None:
+    slug = _slug(Path(str(repo_name)).name)
+    services = detected["services"]
+    root = next((service for service in services if service["name"] == ROOT_SERVICE), None)
+    if root is None:
+        return
+    existing = next((service for service in services if service["name"] == slug), None)
+    if existing is not None and existing is not root:
+        for path in root["paths"]:
+            if path not in existing["paths"]:
+                existing["paths"].append(path)
+        for fname in root["functions"]:
+            if fname not in existing["functions"]:
+                existing["functions"].append(fname)
+        existing["root"] = True
+        services.remove(root)
+        return
+    root["name"] = slug
+
+
+def _note(detected: dict) -> str:
+    named = sum(len(service["functions"]) for service in detected["services"])
+    folders = sum(1 for service in detected["services"] if not service["functions"])
+    text = (
+        f"Found {len(detected['services'])} services and {named} function names. "
+        f"{folders} services had no function name in the files that were read. "
+        "A review needs a scoped change (git base/head, working tree, or explicit files). "
+        "A test file is recorded as not-run. CI run results, deployment health, incidents, and tiers "
+        "are not in the git tree, so they are left missing."
+    )
+    if detected.get("truncated"):
+        text += " GitHub did not return the full file tree."
+    return text
+
+
 def _service_for_path(services: list[dict], path: str) -> dict | None:
-    parts = set(path.split("/"))
-    matches = [service for service in services if service["name"] in parts]
-    if not matches:
-        return None
-    return sorted(matches, key=lambda service: len(service["name"]), reverse=True)[0]
+    parts = path.split("/")
+    partset = {_slug(part) for part in parts}
+    matches = [
+        service for service in services if service["name"] in partset and service["name"] != ROOT_SERVICE
+    ]
+    if matches:
+        return sorted(matches, key=lambda service: len(service["name"]), reverse=True)[0]
+    if len(services) == 1:
+        return services[0]
+    roots = [service for service in services if service.get("root")]
+    if len(roots) == 1 and (len(parts) == 1 or parts[0] in ROOT_SOURCE_DIRS):
+        return roots[0]
+    return None
 
 
 def _looks_like_test(path: str) -> bool:
@@ -468,12 +511,22 @@ def _scan_functions(filename: str, text: str) -> list[str]:
                 found.append(name)
     elif filename.endswith((".js", ".ts", ".tsx", ".jsx")):
         for line in text.splitlines():
+            indented = line.startswith((" ", "\t"))
             stripped = line.strip()
-            if not stripped.startswith("function "):
-                continue
-            name = stripped[len("function ") :].split("(")[0].strip()
-            if name and name not in found:
-                found.append(name)
+            if stripped.startswith("export default "):
+                stripped = stripped[len("export default ") :]
+            elif stripped.startswith("export "):
+                stripped = stripped[len("export ") :]
+            _remember_js(found, stripped, indented)
+    elif filename.endswith(".rs"):
+        for line in text.splitlines():
+            stripped = line.strip()
+            for prefix in ("pub async fn ", "async fn ", "pub fn ", "fn "):
+                if stripped.startswith(prefix):
+                    name = stripped[len(prefix) :].split("(")[0].strip()
+                    if name and not name.startswith("_") and name not in found:
+                        found.append(name)
+                    break
     elif filename.endswith(".proto"):
         for name in _proto_rpcs(text):
             if name not in found:
@@ -558,6 +611,75 @@ def _merge_functions(services: list[dict], functions: dict[str, list[str]]) -> N
         service["functions"] = service["functions"][:8]
 
 
+_JS_CLASS = re.compile(r"^class\s+([A-Za-z_$][\w$]*)")
+_JS_FUNC = re.compile(r"^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)")
+_JS_ARROW = re.compile(
+    r"^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:function\b|\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>"
+)
+_JS_METHOD = re.compile(r"^(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{")
+_JS_SKIP = {"if", "for", "while", "switch", "catch", "function", "return", "do", "else"}
+_BORING_FILES = {"__init__.py", "setup.py", "setup_dev_env.py", "conftest.py", "wsgi.py"}
+_INTERESTING_DIRS = {"src", "lib", "app", "views", "controllers", "command", "commands", "handlers", "api"}
+
+
+def _remember_js(found: list[str], stripped: str, indented: bool) -> None:
+    class_match = _JS_CLASS.match(stripped)
+    if class_match:
+        _append_symbol(found, class_match.group(1))
+        return
+    func_match = _JS_FUNC.match(stripped)
+    if func_match:
+        _append_symbol(found, func_match.group(1))
+        return
+    arrow_match = _JS_ARROW.match(stripped)
+    if arrow_match:
+        _append_symbol(found, arrow_match.group(1))
+        return
+    if not indented:
+        return
+    method_match = _JS_METHOD.match(stripped)
+    if method_match and method_match.group(1) not in _JS_SKIP:
+        _append_symbol(found, method_match.group(1))
+
+
+def _append_symbol(found: list[str], name: str) -> None:
+    if name and name not in found and not name.startswith("_"):
+        found.append(name)
+
+
+def _merge_compose(parts: list[dict]) -> dict[str, list[str]]:
+    merged: dict[str, list[str]] = {}
+    for part in parts:
+        for name, deps in part.items():
+            bucket = merged.setdefault(str(name), [])
+            for dep in deps:
+                if dep not in bucket:
+                    bucket.append(dep)
+    return merged
+
+
+def _compose_paths(paths: list[str]) -> list[str]:
+    found = [path for path in paths if path.rsplit("/", 1)[-1] in COMPOSE_NAMES]
+    found.sort(key=lambda path: (path.count("/"), path))
+    return found
+
+
+def _source_rank(path: str) -> tuple:
+    parts = path.split("/")
+    name = parts[-1]
+    boring = name in _BORING_FILES or name.startswith("__")
+    interesting = any(part in _INTERESTING_DIRS for part in parts)
+    kind = 0 if path.endswith(".py") else 1 if path.endswith((".js", ".jsx", ".ts", ".tsx")) else 2
+    return (boring, not interesting, kind, path.count("/"), path)
+
+
+def _skipped_tree_path(path: str) -> bool:
+    if set(path.split("/")) & SKIP_DIRS:
+        return True
+    name = path.rsplit("/", 1)[-1]
+    return name.endswith(".min.js") or name.endswith(".min.ts")
+
+
 def _github_functions(
     owner: str, name: str, branch: str, paths: list[str], services: list[dict]
 ) -> dict[str, list[str]]:
@@ -566,17 +688,35 @@ def _github_functions(
         for path in paths
         if path.endswith(SOURCE_SUFFIXES)
         and not _looks_like_test(path)
-        and ".github/" not in path
+        and not _skipped_tree_path(path)
         and _service_for_path(services, path) is not None
     ]
-    found: dict[str, list[str]] = {}
-    for path in candidates[:MAX_REMOTE_SOURCES]:
+    by_service: dict[str, list[str]] = {}
+    for path in candidates:
+        service = _service_for_path(services, path)
+        if service is None:
+            continue
+        by_service.setdefault(service["name"], []).append(path)
+    chosen: list[str] = []
+    for paths_for_service in by_service.values():
+        paths_for_service.sort(key=_source_rank)
+        chosen.extend(paths_for_service[:3])
+    chosen = chosen[:MAX_REMOTE_SOURCES]
+
+    def read_one(path: str) -> tuple[str, list[str]]:
         text = _github_text_optional(f"https://raw.githubusercontent.com/{owner}/{name}/{branch}/{path}")
         if not text:
-            continue
-        names = _scan_functions(path.rsplit("/", 1)[-1], text)
-        if names:
-            found[path] = names
+            return path, []
+        return path, _scan_functions(path.rsplit("/", 1)[-1], text)
+
+    found: dict[str, list[str]] = {}
+    if not chosen:
+        return found
+    workers = min(8, len(chosen))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for path, names in pool.map(read_one, chosen):
+            if names:
+                found[path] = names
     return found
 
 

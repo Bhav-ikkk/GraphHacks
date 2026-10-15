@@ -33,8 +33,21 @@
             <input id="target" name="target" placeholder="https://github.com/owner/name" autocomplete="off" />
             <button type="submit">Analyze</button>
           </div>
+          <label for="files">Changed files (comma-separated). Local git can fill this from base/head.</label>
+          <input id="files" name="files" placeholder="payments/charge.py, checkout/checkout.py" autocomplete="off" />
+          <div class="row twin">
+            <div>
+              <label for="base">Git base</label>
+              <input id="base" name="base" placeholder="HEAD~1" autocomplete="off" />
+            </div>
+            <div>
+              <label for="head">Git head</label>
+              <input id="head" name="head" placeholder="HEAD" autocomplete="off" />
+            </div>
+          </div>
         </form>
         <p class="hint" id="origin-note"></p>
+        <p class="hint" id="scope-note"></p>
         <p class="error" id="ingest-error" hidden></p>
         <div id="service-editor" hidden>
           <h3>What the repository contained</h3>
@@ -46,10 +59,11 @@
       <article class="panel">
         <header>
           <h2>Change</h2>
-          <p id="change-help">After Analyze, pick a function or service folder from that repository.</p>
+          <p id="change-help">One scoped change from the diff or file list — not every function in the tree.</p>
         </header>
-        <label for="change">What changed</label>
+        <label for="change">Scoped change</label>
         <select id="change"></select>
+        <button type="button" id="rescope" class="secondary">Rescope from fields above</button>
         <label for="mode">Evidence mode</label>
         <select id="mode">
           <option value="full">Full graph</option>

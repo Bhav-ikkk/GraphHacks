@@ -38,19 +38,45 @@ function showError(id, error) {
   node.textContent = error ? error.message || String(error) : "";
 }
 
+function parseFiles(value) {
+  return value
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function scopePayload() {
+  const files = parseFiles($("files").value);
+  const base = $("base").value.trim() || null;
+  const head = $("head").value.trim() || null;
+  const body = {};
+  if (files.length) body.files = files;
+  if (base) body.base = base;
+  if (head) body.head = head;
+  return body;
+}
+
 function renderSnapshot(next) {
   snapshot = next;
   $("backend").textContent = next.backend;
   $("origin-note").textContent = next.note || "";
+  $("scope-note").textContent = next.scope_note || "";
   const change = $("change");
   const previous = change.value;
   change.innerHTML = "";
+  if (!next.changes.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "Scope a change (files or git base/head)";
+    change.appendChild(option);
+  }
   for (const item of next.changes) {
     const option = document.createElement("option");
     option.value = item.id;
-    const expected = item.expected ? ` · ${stateLabel[item.expected] || item.expected}` : "";
-    const note = item.note ? ` · ${item.note}` : "";
-    option.textContent = `${item.id}  ${item.title}${expected}${note}`;
+    const mapping = item.mapping ? ` · ${item.mapping}` : "";
+    const symbols = (item.symbols || []).slice(0, 3).join(", ");
+    const more = (item.symbols || []).length > 3 ? ` +${item.symbols.length - 3}` : "";
+    option.textContent = `${item.title || item.id}${mapping}${symbols ? ` · ${symbols}${more}` : ""}`;
     change.appendChild(option);
   }
   if ([...change.options].some((option) => option.value === previous)) {
@@ -61,6 +87,7 @@ function renderSnapshot(next) {
   const services = $("services");
   services.innerHTML = "";
   $("run").disabled = next.changes.length === 0;
+  $("rescope").disabled = next.dataset !== "repository";
   if (next.dataset === "repository") {
     for (const service of next.services) {
       const row = document.createElement("div");
@@ -78,7 +105,8 @@ function renderRecord(payload, mode) {
   const record = payload.runs[mode];
   current = { payload, mode, record };
   $("results").hidden = false;
-  $("kicker").textContent = `${record.change_id} · ${modeLabel[mode]} · policy ${record.policy_version}`;
+  const revision = record.graph_revision ? ` · graph ${record.graph_revision}` : "";
+  $("kicker").textContent = `${record.change_id} · ${modeLabel[mode]} · policy ${record.policy_version}${revision}`;
   const state = $("state");
   state.textContent = stateLabel[record.state] || record.state;
   state.className = `state-${record.state}`;
@@ -234,16 +262,44 @@ $("ingest-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   showError("ingest-error", null);
   const target = $("target").value.trim();
+  const button = event.submitter || $("ingest-form").querySelector("button");
   if (!target) {
     showError("ingest-error", new Error("Paste a GitHub URL or a folder path."));
     return;
   }
+  button.disabled = true;
+  button.textContent = "Scanning…";
   try {
-    const body = await api("/api/ingest", { method: "POST", body: JSON.stringify({ target }) });
+    const body = await api("/api/ingest", {
+      method: "POST",
+      body: JSON.stringify({ target, ...scopePayload() }),
+    });
     renderSnapshot(body.snapshot);
     $("results").hidden = true;
   } catch (error) {
     showError("ingest-error", error);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Analyze";
+  }
+});
+
+$("rescope").addEventListener("click", async () => {
+  showError("ingest-error", null);
+  showError("review-error", null);
+  const button = $("rescope");
+  button.disabled = true;
+  try {
+    const body = await api("/api/change", {
+      method: "POST",
+      body: JSON.stringify(scopePayload()),
+    });
+    renderSnapshot(body.snapshot);
+    $("results").hidden = true;
+  } catch (error) {
+    showError("ingest-error", error);
+  } finally {
+    button.disabled = snapshot?.dataset !== "repository";
   }
 });
 

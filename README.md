@@ -18,12 +18,11 @@ python -m edl serve
 
 Open http://127.0.0.1:8000
 
-The page starts empty. Paste a GitHub URL or a folder and press Analyze. `examples/mini-repo` is a small compose tree you can use offline. It is not loaded for you.
+The page starts empty. Paste a GitHub URL or a folder on this machine and press Analyze. That repository is the only data the review uses.
 
 ```powershell
-python -m edl ingest examples/mini-repo
-python -m edl review examples/mini-repo repo:payments.Charge
-python -m edl falkor examples/mini-repo
+python -m edl ingest https://github.com/owner/name
+python -m edl review https://github.com/owner/name repo:service.function
 ```
 
 ## FalkorDB

@@ -37,6 +37,7 @@ LABELS = {
     "Fix",
     "Policy",
     "Change",
+    "UnresolvedPath",
     "DecisionRecord",
     "Outcome",
     "EvidenceSource",
@@ -53,6 +54,8 @@ RELATIONS = {
     "RESOLVED_BY",
     "MODIFIES",
     "CALLS",
+    "TOUCHES",
+    "UNRESOLVED",
     "DECIDES",
     "SUPPORTED_BY",
     "GOVERNS",
@@ -129,10 +132,10 @@ def _published(settings: FalkorSettings, remote, graph: MemoryGraph, *, via: str
     names = written.get("services") or []
     shown = ", ".join(names[:6]) if names else "no Service nodes were read back"
     where = settings.browser if via == "browser" else f"{settings.host}:{settings.port}"
-    detail = (
-        f"FalkorDB {where} / {settings.graph} "
-        f"({written['nodes']} nodes, {written['edges']} edges). Read back: {shown}."
-    )
+    # detail = (
+    #     f"FalkorDB {where} / {settings.graph} "
+    #     f"({written['nodes']} nodes, {written['edges']} edges). Read back: {shown}."
+    # )
     _state.update(ok=True, skipped=False, detail=detail, error=None, nodes=written["nodes"], edges=written["edges"])
     return dict(_state)
 

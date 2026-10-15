@@ -21,9 +21,13 @@ Open http://127.0.0.1:8000
 The page starts empty. Paste a GitHub URL or a folder on this machine and press Analyze. That repository is the only data the review uses.
 
 ```powershell
-python -m edl ingest https://github.com/owner/name
-python -m edl review https://github.com/owner/name repo:service.function
+python -m edl ingest https://github.com/owner/name --files path/to/changed.py
+python -m edl review https://github.com/owner/name --files path/to/changed.py
+python -m edl eval
 ```
+
+`python -m edl eval` runs labeled scenarios (safe / risky / uncertain) and scores
+**unjustified PROCEED** plus graph lift vs graph-off. Fixtures never load into the live server.
 
 ## FalkorDB
 

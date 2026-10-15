@@ -203,9 +203,12 @@ def _evaluate(reader: GraphReader, change, policy, mode, trace, now) -> dict:
         for item in resolved:
             item["callers"] = 0
 
+    # Every service touched by the change is direct. Consumers are expanded after,
+    # so a dependency between two changed services cannot demote either to hops>0.
     affected = []
     seen_services = set()
     hop_limit_hit = False
+    direct_ids: list[str] = []
     for item in resolved:
         if not item["service"] or item["service"] in seen_services:
             continue
@@ -213,11 +216,14 @@ def _evaluate(reader: GraphReader, change, policy, mode, trace, now) -> dict:
         affected.append(
             {"service": item["service"], "tier": item["tier"], "hops": 0, "kind": "direct"}
         )
-        found, truncated = reader.consumers(item["service_id"], hop_limit)
+        if item.get("service_id"):
+            direct_ids.append(item["service_id"])
+    for service_id in direct_ids:
+        found, truncated = reader.consumers(service_id, hop_limit)
         if mode == "full" and truncated:
             hop_limit_hit = True
-        for service_id, hops in found.items():
-            node = reader.node(service_id)
+        for consumer_id, hops in found.items():
+            node = reader.node(consumer_id)
             if node is None or node["name"] in seen_services:
                 continue
             seen_services.add(node["name"])

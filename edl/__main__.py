@@ -162,6 +162,22 @@ def falkor(target: str) -> None:
         raise typer.Exit(code=1)
 
 
+@app.command("eval")
+def evaluate(
+    scenario: Optional[str] = typer.Option(
+        None, help="Comma-separated scenario ids; default runs all"
+    ),
+) -> None:
+    """Run the labeled evaluation harness (never loads fixtures into the live server)."""
+    from edl.eval.harness import format_report, run_eval
+
+    ids = [part.strip() for part in scenario.split(",")] if scenario else None
+    result = run_eval(scenario_ids=ids)
+    typer.echo(format_report(result))
+    if not result["summary"]["pass"]:
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def serve(port: int = 8000) -> None:
     """Start the review UI. It stays empty until you analyze a repository."""

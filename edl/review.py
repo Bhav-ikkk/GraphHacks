@@ -5,9 +5,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from edl.evidence import assemble_evidence, catalog_ids, reject_claim, validate_decision_record
+from edl.graph_reader import GraphReader, MemoryReader
 from edl.memory import MemoryGraph
 from edl.models import NOW
-from edl import queries
 from edl.policy import decide
 
 INJECTION_MARKERS = (
@@ -27,11 +27,13 @@ def review_change(
     *,
     now: datetime = NOW,
     writeback: bool = False,
+    reader: GraphReader | None = None,
 ) -> dict:
     working = graph.copy()
+    active = reader or MemoryReader(working)
     trace: list[dict] = []
     injection = _injection(change.get("description", ""))
-    evidence = _evaluate(working, change, policy, mode, trace, now)
+    evidence = _evaluate(active, change, policy, mode, trace, now)
     decision = decide(evidence, policy)
     commit = change.get("commit", f"sha-{change['id'].lower()}")
     evidence_records = assemble_evidence(evidence, decision, now=now, commit=commit)
@@ -55,6 +57,7 @@ def review_change(
         "missing": decision["missing"],
         "policy_version": decision["policy_version"],
         "graph_revision": working.revision(),
+        "graph_backend": getattr(active, "backend", "unknown"),
         "tool_calls": trace,
         "injection": injection,
         "graph": _view(evidence, decision),
@@ -120,7 +123,7 @@ def _summarize(result) -> str:
     return str(result)
 
 
-def _evaluate(graph, change, policy, mode, trace, now) -> dict:
+def _evaluate(reader: GraphReader, change, policy, mode, trace, now) -> dict:
     hop_limit = 1 if mode == "one_hop" else policy["hop_limit"]
     graph_on = mode != "graph_off"
     mapping = change.get("mapping", "resolved")
@@ -128,7 +131,7 @@ def _evaluate(graph, change, policy, mode, trace, now) -> dict:
     # Always resolve declared symbols. mapping (resolved/partial/unresolved) is about
     # whether every modified path mapped; it must not hide known symbols.
     for symbol in change.get("symbols", []):
-        node = graph.node(f"fn:{symbol}")
+        node = reader.node(f"fn:{symbol}")
         if node:
             functions.append(node)
     claimed = _services_from_paths(change.get("files", []))
@@ -177,8 +180,8 @@ def _evaluate(graph, change, policy, mode, trace, now) -> dict:
 
     resolved = []
     for node in functions:
-        service = queries.function_service(graph, node["id"])
-        caller_ids = queries.callers(graph, node["id"])
+        service = reader.function_service(node["id"])
+        caller_ids = reader.callers(node["id"])
         resolved.append(
             {
                 "id": node["id"],
@@ -210,11 +213,11 @@ def _evaluate(graph, change, policy, mode, trace, now) -> dict:
         affected.append(
             {"service": item["service"], "tier": item["tier"], "hops": 0, "kind": "direct"}
         )
-        found, truncated = queries.consumers(graph, item["service_id"], hop_limit)
+        found, truncated = reader.consumers(item["service_id"], hop_limit)
         if mode == "full" and truncated:
             hop_limit_hit = True
         for service_id, hops in found.items():
-            node = graph.node(service_id)
+            node = reader.node(service_id)
             if node is None or node["name"] in seen_services:
                 continue
             seen_services.add(node["name"])
@@ -226,8 +229,8 @@ def _evaluate(graph, change, policy, mode, trace, now) -> dict:
     for item in resolved:
         if not item.get("service_id"):
             continue
-        for edge in graph.edges_from(item["service_id"], "DEPENDS_ON"):
-            node = graph.node(edge["dst"])
+        for edge in reader.edges_from(item["service_id"], "DEPENDS_ON"):
+            node = reader.node(edge["dst"])
             if node is None or node["name"] in outgoing_seen or node["name"] in seen_services:
                 continue
             outgoing_seen.add(node["name"])
@@ -243,9 +246,9 @@ def _evaluate(graph, change, policy, mode, trace, now) -> dict:
     direct_owners = []
     for item in affected:
         service_id = f"svc:{item['service']}"
-        if graph.node(service_id) is None:
+        if reader.node(service_id) is None:
             continue
-        owner = queries.owner_of(graph, service_id, now, policy["freshness"]["owner_days"])
+        owner = reader.owner_of(service_id, now, policy["freshness"]["owner_days"])
         owner["service"] = item["service"]
         owner["hops"] = item["hops"]
         owners.append(owner)
@@ -259,7 +262,7 @@ def _evaluate(graph, change, policy, mode, trace, now) -> dict:
     if mode == "full":
         for item in affected:
             service_id = f"svc:{item['service']}"
-            for incident in queries.open_incidents(graph, service_id):
+            for incident in reader.open_incidents(service_id):
                 incidents_open.append(
                     {
                         "name": incident["name"],
@@ -270,7 +273,7 @@ def _evaluate(graph, change, policy, mode, trace, now) -> dict:
                     }
                 )
         for item in resolved:
-            for pair in queries.prior_fixes(graph, item["id"]):
+            for pair in reader.prior_fixes(item["id"]):
                 incidents_prior.append(
                     {
                         "incident": pair["incident"]["name"],
@@ -279,7 +282,7 @@ def _evaluate(graph, change, policy, mode, trace, now) -> dict:
                     }
                 )
         if change.get("text_mentions_incident"):
-            for incident in graph.by_label("Incident"):
+            for incident in reader.by_label("Incident"):
                 if incident.get("service") not in {item["service"] for item in affected}:
                     unrelated.append(incident["name"])
     _call(
@@ -293,7 +296,7 @@ def _evaluate(graph, change, policy, mode, trace, now) -> dict:
 
     tests = []
     for item in resolved:
-        status = queries.test_status(graph, item["id"])
+        status = reader.test_status(item["id"])
         tests.append({"function": item["name"], "status": status, "changed": True})
     _call(trace, "get_test_coverage", {"functions": [item["name"] for item in resolved]}, tests)
 
@@ -301,8 +304,8 @@ def _evaluate(graph, change, policy, mode, trace, now) -> dict:
     shared = any(item.get("kind") == "library" for item in resolved)
     if shared:
         for item in resolved:
-            for callee_service in _critical_consumers(graph, item, affected):
-                status, fname = _consumer_test(graph, item["id"], callee_service)
+            for callee_service in _critical_consumers(reader, item, affected):
+                status, fname = _consumer_test(reader, item["id"], callee_service)
                 critical_consumer_tests.append(
                     {"service": callee_service["name"], "function": fname, "status": status}
                 )
@@ -313,7 +316,7 @@ def _evaluate(graph, change, policy, mode, trace, now) -> dict:
     for item in affected:
         if item["hops"] > hop_limit:
             continue
-        node = queries.deploy_of(graph, f"svc:{item['service']}")
+        node = reader.deploy_of(f"svc:{item['service']}")
         if node is None:
             deploys.append(
                 {"service": item["service"], "present": False, "age_hours": None, "health": None, "tier": item["tier"]}
@@ -333,7 +336,7 @@ def _evaluate(graph, change, policy, mode, trace, now) -> dict:
     rollback_fix = None
     if mode == "full" and change.get("intent") == "rollback":
         for item in resolved:
-            fixes = queries.prior_fixes(graph, item["id"])
+            fixes = reader.prior_fixes(item["id"])
             if fixes:
                 rollback_fix = {"name": fixes[0]["fix"]["name"], "function": item["name"]}
                 break
@@ -400,33 +403,33 @@ def _evaluate(graph, change, policy, mode, trace, now) -> dict:
     )
 
 
-def _critical_consumers(graph, function: dict, affected: list[dict]) -> list[dict]:
+def _critical_consumers(reader: GraphReader, function: dict, affected: list[dict]) -> list[dict]:
     consumers = []
     for item in affected:
         if item["hops"] == 0 or item.get("tier") is None or item["tier"] > 1:
             continue
-        node = graph.node(f"svc:{item['service']}")
+        node = reader.node(f"svc:{item['service']}")
         if node:
             consumers.append(node)
     return consumers
 
 
-def _consumer_test(graph, function_id: str, service: dict) -> tuple[str, str]:
-    for caller in queries.callers(graph, function_id):
-        parent = queries.function_service(graph, caller)
+def _consumer_test(reader: GraphReader, function_id: str, service: dict) -> tuple[str, str]:
+    for caller in reader.callers(function_id):
+        parent = reader.function_service(caller)
         if parent and parent["id"] == service["id"]:
-            node = graph.node(caller)
+            node = reader.node(caller)
             name = node["name"] if node else caller
-            return queries.test_status(graph, caller), name
+            return reader.test_status(caller), name
     functions = [
-        graph.node(edge["src"])
-        for edge in graph.edges_to(service["id"], "PART_OF")
+        reader.node(edge["src"])
+        for edge in reader.edges_to(service["id"], "PART_OF")
     ]
     functions = [node for node in functions if node]
     if not functions:
         return "missing", service["name"]
     first = functions[0]
-    return queries.test_status(graph, first["id"]), first["name"]
+    return reader.test_status(first["id"]), first["name"]
 
 
 def _bundle(change, mode, **fields) -> dict:

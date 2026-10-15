@@ -27,7 +27,9 @@ python -m edl review https://github.com/owner/name repo:service.function
 
 ## FalkorDB
 
-Copy `.env.example` to `.env` if you need a fresh file. Leave `FALKORDB_USERNAME` empty. The only value you set is `FALKORDB_PASSWORD`.
+FalkorDB is the decision backbone. Reviews read blast radius, owners, tests, deploys, and incidents through named Cypher tools. If FalkorDB is not connected, the product fails closed with **insufficient evidence** — it does not invent a safe decision from an in-memory copy.
+
+Copy `.env.example` to `.env`. Leave `FALKORDB_USERNAME` empty. Set `FALKORDB_PASSWORD`. Do not set `EDL_ALLOW_MEMORY_GRAPH` for demos (tests set it automatically).
 
 The app signs in at [the browser on port 3000](http://13.236.193.238:3000/login) and writes the graph named in `FALKORDB_GRAPH`. Open that same site with `falkor://:<password>@localhost:6379` and select the graph. Details are in [docs/04-falkordb.md](docs/04-falkordb.md).
 

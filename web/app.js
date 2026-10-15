@@ -106,7 +106,8 @@ function renderRecord(payload, mode) {
   current = { payload, mode, record };
   $("results").hidden = false;
   const revision = record.graph_revision ? ` · graph ${record.graph_revision}` : "";
-  $("kicker").textContent = `${record.change_id} · ${modeLabel[mode]} · policy ${record.policy_version}${revision}`;
+  const backend = record.graph_backend ? ` · ${record.graph_backend}` : "";
+  $("kicker").textContent = `${record.change_id} · ${modeLabel[mode]} · policy ${record.policy_version}${revision}${backend}`;
   const state = $("state");
   state.textContent = stateLabel[record.state] || record.state;
   state.className = `state-${record.state}`;

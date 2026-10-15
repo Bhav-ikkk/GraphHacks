@@ -1,13 +1,7 @@
-"""Project the working graph into FalkorDB with the official Python client.
+"""Publish the working graph to FalkorDB and keep a live read handle.
 
-    client = FalkorDB(host, port, username=None, password=password)
-    graph = client.select_graph(name)
-    graph.query(...)
-    graph.ro_query(...).result_set
-
-Decisions are still computed in Python. When the database accepts a connection,
-the same nodes and edges are written to the graph named in FALKORDB_GRAPH so
-they show up in FalkorDB Browser. The client never sends free-text Cypher.
+FalkorDB is the product backbone. Reviews read relationships through this module.
+The client never accepts free-text Cypher from the UI.
 """
 
 from __future__ import annotations
@@ -21,6 +15,7 @@ import urllib.request
 from typing import Any
 
 from edl.config import FalkorSettings, falkor_settings
+from edl.graph_reader import FalkorReader
 from edl.memory import MemoryGraph
 
 BROWSER_URL = "http://13.236.193.238:3000/login"
@@ -65,21 +60,34 @@ _NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
 _state: dict[str, Any] = {
     "ok": False,
     "skipped": False,
-    "detail": "in-memory",
+    "detail": "FalkorDB not connected",
     "error": None,
     "nodes": 0,
     "edges": 0,
+    "via": None,
 }
+_live: dict[str, Any] = {"selected": None, "graph_name": None}
 
 
 def backend_label() -> str:
-    return str(_state.get("detail") or "in-memory")
+    return str(_state.get("detail") or "FalkorDB not connected")
+
+
+def is_ready() -> bool:
+    return bool(_state.get("ok") and _live.get("selected") is not None)
+
+
+def live_reader() -> FalkorReader:
+    if not is_ready():
+        raise RuntimeError("FalkorDB is not ready. Publish a graph before reading.")
+    return FalkorReader(_live["selected"])
 
 
 def status() -> dict[str, Any]:
     settings = falkor_settings()
     return {
         "ok": bool(_state.get("ok")),
+        "ready": is_ready(),
         "configured": settings.configured,
         "host": settings.host,
         "port": settings.port,
@@ -90,26 +98,48 @@ def status() -> dict[str, Any]:
         "error": _state.get("error"),
         "nodes": _state.get("nodes") or 0,
         "edges": _state.get("edges") or 0,
+        "via": _state.get("via"),
     }
 
 
+def clear_live() -> None:
+    _live.update(selected=None, graph_name=None)
+    _state.update(ok=False, skipped=False, detail="FalkorDB not connected", error=None, nodes=0, edges=0, via=None)
+
+
 def publish(graph: MemoryGraph, *, force: bool = False) -> dict[str, Any]:
-    """Replace the remote graph with this one. Safe to call when unconfigured."""
+    """Replace the remote graph and keep a live read handle for reviews."""
+    clear_live()
     if not force and os.environ.get("PYTEST_CURRENT_TEST"):
-        _state.update(ok=False, skipped=True, detail="in-memory (tests do not call FalkorDB)", error=None)
+        _state.update(
+            ok=False,
+            skipped=True,
+            detail="tests skip live FalkorDB (EDL_ALLOW_MEMORY_GRAPH provides a labeled test double)",
+            error=None,
+            via=None,
+        )
         return dict(_state)
     settings = falkor_settings()
     if not settings.configured:
-        _state.update(ok=False, skipped=False, detail="in-memory (set FALKORDB_HOST in .env)", error=None)
+        _state.update(
+            ok=False,
+            skipped=False,
+            detail="FalkorDB not configured (set FALKORDB_HOST or FALKORDB_BROWSER in .env)",
+            error="not configured",
+            nodes=0,
+            edges=0,
+            via=None,
+        )
         return dict(_state)
     if not settings.password:
         _state.update(
             ok=False,
             skipped=False,
-            detail="in-memory (put the database password in FALKORDB_PASSWORD and leave the username empty)",
+            detail="FalkorDB password missing (set FALKORDB_PASSWORD; leave username empty)",
             error="password missing",
             nodes=0,
             edges=0,
+            via=None,
         )
         return dict(_state)
     errors: list[str] = []
@@ -122,21 +152,33 @@ def publish(graph: MemoryGraph, *, force: bool = False) -> dict[str, Any]:
         return _published(settings, _connect(settings), graph, via="redis")
     except Exception as exc:
         errors.append(_explain(exc, settings))
-    detail = "in-memory; FalkorDB not reachable (" + "; ".join(errors) + ")"
-    _state.update(ok=False, skipped=False, detail=detail, error=detail, nodes=0, edges=0)
+    detail = "FalkorDB not reachable (" + "; ".join(errors) + ")"
+    _state.update(ok=False, skipped=False, detail=detail, error=detail, nodes=0, edges=0, via=None)
     return dict(_state)
 
 
 def _published(settings: FalkorSettings, remote, graph: MemoryGraph, *, via: str) -> dict[str, Any]:
+    selected = remote.select_graph(settings.graph)
     written = replace_graph(remote, settings.graph, graph)
+    # replace_graph selects again; keep a fresh handle for reads
+    selected = remote.select_graph(settings.graph)
+    _live.update(selected=selected, graph_name=settings.graph)
     names = written.get("services") or []
     shown = ", ".join(names[:6]) if names else "no Service nodes were read back"
     where = settings.browser if via == "browser" else f"{settings.host}:{settings.port}"
-    # detail = (
-    #     f"FalkorDB {where} / {settings.graph} "
-    #     f"({written['nodes']} nodes, {written['edges']} edges). Read back: {shown}."
-    # )
-    _state.update(ok=True, skipped=False, detail=detail, error=None, nodes=written["nodes"], edges=written["edges"])
+    detail = (
+        f"FalkorDB {where} / {settings.graph} "
+        f"({written['nodes']} nodes, {written['edges']} edges). Read back: {shown}."
+    )
+    _state.update(
+        ok=True,
+        skipped=False,
+        detail=detail,
+        error=None,
+        nodes=written["nodes"],
+        edges=written["edges"],
+        via=via,
+    )
     return dict(_state)
 
 

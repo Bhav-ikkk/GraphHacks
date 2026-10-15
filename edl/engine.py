@@ -9,6 +9,7 @@ from pathlib import Path
 from edl import change as change_scope
 from edl import falkor, gate, ingest
 from edl.change import ChangeError
+from edl.graph_reader import GraphUnavailable, MemoryReader, allow_memory_graph
 from edl.memory import MemoryGraph
 from edl.models import MODES
 from edl.policy import PolicyError, load_policy
@@ -191,10 +192,17 @@ class Engine:
             policy = self.policy
         except PolicyError as exc:
             return _fail_closed(change_id, mode, str(exc))
+        try:
+            reader, backend = self._reader_for_review()
+        except GraphUnavailable as exc:
+            return _fail_no_graph(change_id, mode, str(exc))
         change = self.change(change_id)
         runs = {}
         for name in (mode, *[item for item in MODES if item != mode]):
-            record = review_change(self.graph, change, policy, name, writeback=False)
+            record = review_change(
+                self.graph, change, policy, name, writeback=False, reader=reader
+            )
+            record["graph_backend"] = backend
             runs[name] = self._remember(record, change)
         return {"active": mode, "runs": runs}
 
@@ -203,8 +211,16 @@ class Engine:
             return self._act(change_id, mode)
 
     def _act(self, change_id: str, mode: str = "full") -> dict:
+        try:
+            reader, backend = self._reader_for_review()
+        except GraphUnavailable as exc:
+            closed = _fail_no_graph(change_id, mode, str(exc))
+            return {"decision": closed["runs"][mode], "action": closed["runs"][mode]["action"]}
         change = self.change(change_id)
-        record = review_change(self.graph, change, self.policy, mode, writeback=False)
+        record = review_change(
+            self.graph, change, self.policy, mode, writeback=False, reader=reader
+        )
+        record["graph_backend"] = backend
         outcome = gate.execute(record, change, self.issued)
         if outcome.get("status") == "created" and "id" not in outcome:
             self.issue_seq += 1
@@ -253,11 +269,25 @@ class Engine:
         with self.log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload) + "\n")
 
+    def _reader_for_review(self):
+        """FalkorDB is required in product mode. Memory is only a labeled test double."""
+        if falkor.is_ready():
+            return falkor.live_reader(), "falkordb"
+        if allow_memory_graph():
+            return MemoryReader(self.graph), "memory-test-double"
+        detail = falkor.status().get("detail") or "FalkorDB is not connected"
+        raise GraphUnavailable(
+            "FalkorDB is the decision backbone and is not ready. "
+            f"{detail}. Set FALKORDB_HOST/PASSWORD and publish a graph before review."
+        )
+
     def snapshot(self) -> dict:
         nodes, edges = self.graph.counts()
+        remote = falkor.status()
         return {
             "backend": falkor.backend_label(),
-            "falkor": falkor.status(),
+            "falkor": remote,
+            "graph_ready": falkor.is_ready() or allow_memory_graph(),
             "dataset": self.dataset,
             "origin": self.origin,
             "note": self.note,
@@ -300,10 +330,68 @@ def _fail_closed(change_id: str, mode: str, reason: str) -> dict:
         "missing": [{"policy": "POLICY_FILE", "detail": reason, "evidence_id": "ev-policy"}],
         "policy_version": None,
         "graph_revision": None,
+        "graph_backend": "unavailable",
         "tool_calls": [],
         "graph": {"nodes": [], "edges": []},
         "injection": [],
         "action": {"status": "blocked", "reason": "Policy file failed closed.", "retries": 0},
+    }
+    return {"active": mode, "runs": {mode: record}}
+
+
+def _fail_no_graph(change_id: str, mode: str, reason: str) -> dict:
+    """Fail closed when FalkorDB cannot back the review. Never invent a safe decision."""
+    detail = (
+        "FalkorDB did not back this review. The product will not decide from an "
+        f"unverified in-memory copy. {reason}"
+    )
+    record = {
+        "id": f"dec:{change_id}:{mode}:no-graph",
+        "change_id": change_id,
+        "mode": mode,
+        "state": "INSUFFICIENT_EVIDENCE",
+        "rationale": f"INSUFFICIENT_EVIDENCE. {detail}",
+        "claims": [{"text": detail, "evidence_id": "ev-graph-backend", "policy": "P5"}],
+        "rejected_claims": [],
+        "findings": [
+            {
+                "severity": "insufficient",
+                "policy": "P5",
+                "detail": detail,
+                "evidence_id": "ev-graph-backend",
+            }
+        ],
+        "triggered": ["P5"],
+        "evidence": [
+            {
+                "id": "ev-graph-backend",
+                "source_system": "falkordb",
+                "source_ref": None,
+                "entity_id": None,
+                "version_ref": None,
+                "observed_at": None,
+                "freshness_ok": False,
+                "evidence_type": "observed",
+                "role": "missing",
+                "detail": detail,
+                "limitations": "Without FalkorDB the graph is not the decision backbone.",
+                "policy": "P5",
+            }
+        ],
+        "missing": [{"policy": "P5", "detail": detail, "evidence_id": "ev-graph-backend"}],
+        "policy_version": None,
+        "graph_revision": None,
+        "graph_backend": "unavailable",
+        "contract_ok": True,
+        "contract_errors": [],
+        "tool_calls": [],
+        "graph": {"nodes": [], "edges": []},
+        "injection": [],
+        "action": {
+            "status": "blocked",
+            "reason": "FalkorDB is required and was not ready.",
+            "retries": 0,
+        },
     }
     return {"active": mode, "runs": {mode: record}}
 

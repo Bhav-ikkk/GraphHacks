@@ -1,0 +1,51 @@
+version: "2026-10-15"
+freshness:
+  ci_hours: 24
+  deploy_hours: 6
+  owner_days: 90
+hop_limit: 3
+incident_window_days: 7
+hub_caller_min: 6
+rules:
+  - id: P1
+    class: review
+    summary: A tier-0 service inside the hop limit requires a designated reviewer approval.
+  - id: P2
+    class: guard
+    summary: A shared-library change needs a passing test for every critical consumer.
+  - id: P3
+    class: review
+    summary: Payment or auth paths need a designated approval. Approval missing plus a failing check is a hold.
+  - id: P4
+    class: hold
+    summary: An open incident on an affected tier-0 service within 7 days is a hold.
+  - id: P5
+    class: insufficient
+    summary: CI older than 24h, a deploy older than 6h or missing, or an owner older than 90 days abstains.
+  - id: P6
+    class: insufficient
+    summary: An unresolved or inferred symbol mapping abstains. Inferred links are not proof.
+  - id: P7
+    class: review
+    summary: A resolved incident on the same function, linked through a fix, raises the decision to review.
+  - id: P8
+    class: guard
+    summary: A major dependency bump needs an approved migration checklist.
+  - id: R1
+    class: review
+    summary: A change that spans two owners is routed to both.
+  - id: R2
+    class: review
+    summary: A function with 6 or more callers is treated as a hub and sent to review.
+  - id: R3
+    class: hold
+    summary: Failing production health on an affected tier-0 service is a hold, even when CI is green.
+  - id: R4
+    class: review
+    summary: A rollback is reviewable only when the graph can cite the earlier fix.
+  - id: G-TEST
+    class: guard
+    summary: The changed function needs a passing test.
+  - id: G-HOP
+    class: guard
+    summary: Dependents past the 3-hop limit are not treated as clear.

@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Syzygy EDL</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Outfit:wght@380;500;640&family=Newsreader:opsz,wght@6..72,500;6..72,650&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.2/cytoscape.min.js"></script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="mark">Syzygy</span>
+      <span class="product">EDL</span>
+    </div>
+    <p class="tag">Change risk review. The graph decides. The text only explains.</p>
+    <div class="chip" id="backend">Graph backend</div>
+  </header>
+
+  <main>
+    <section class="setup">
+      <article class="panel">
+        <header>
+          <h2>Repository</h2>
+          <p>You choose the tree. The review uses only what that tree contains.</p>
+        </header>
+        <form id="ingest-form">
+          <label for="target">GitHub URL or a folder on this machine</label>
+          <div class="row">
+            <input id="target" name="target" placeholder="https://github.com/owner/name" autocomplete="off" />
+            <button type="submit">Analyze</button>
+          </div>
+        </form>
+        <p class="hint" id="origin-note"></p>
+        <p class="error" id="ingest-error" hidden></p>
+        <div id="service-editor" hidden>
+          <h3>What the repository contained</h3>
+          <p class="hint">Owners appear only when CODEOWNERS names them. There is no guessed tier and no sample incident.</p>
+          <div id="services" class="services"></div>
+        </div>
+      </article>
+
+      <article class="panel">
+        <header>
+          <h2>Change</h2>
+          <p id="change-help">After Analyze, pick a function or service folder from that repository.</p>
+        </header>
+        <label for="change">What changed</label>
+        <select id="change"></select>
+        <label for="mode">Evidence mode</label>
+        <select id="mode">
+          <option value="full">Full graph</option>
+          <option value="one_hop">1-hop only</option>
+          <option value="graph_off">Graph off</option>
+        </select>
+        <button type="button" id="run" class="primary">Run review</button>
+        <p class="error" id="review-error" hidden></p>
+      </article>
+    </section>
+
+    <section id="results" class="results" hidden>
+      <div class="compare" id="compare"></div>
+
+      <div class="sheet-wrap">
+        <article class="sheet" id="sheet">
+          <p class="kicker" id="kicker"></p>
+          <h1 id="state">—</h1>
+          <p class="rationale" id="rationale"></p>
+          <ul class="policies" id="policies"></ul>
+        </article>
+
+        <article class="graph-card">
+          <header>
+            <h2>Evidence path</h2>
+            <p>Only the nodes this decision used.</p>
+          </header>
+          <div id="graph"></div>
+          <ul class="legend">
+            <li><i class="swatch changed"></i>Changed</li>
+            <li><i class="swatch consumer"></i>Consumer</li>
+            <li><i class="swatch dependency"></i>Outgoing dependency</li>
+            <li><i class="swatch incident"></i>Incident or fix</li>
+            <li><i class="swatch owner"></i>Owner</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="columns">
+        <article class="panel">
+          <h2>Claims</h2>
+          <ul id="claims" class="claims"></ul>
+          <h2>Missing or stale</h2>
+          <ul id="missing" class="claims"></ul>
+        </article>
+        <article class="panel">
+          <h2>Tool trace</h2>
+          <ol id="trace" class="trace"></ol>
+        </article>
+        <article class="panel">
+          <h2>Action</h2>
+          <p id="action-reason"></p>
+          <button type="button" id="act" class="primary">Create issue</button>
+          <p id="action-result" class="action-result"></p>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

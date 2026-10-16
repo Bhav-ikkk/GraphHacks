@@ -48,6 +48,11 @@
         </form>
         <p class="hint" id="origin-note"></p>
         <p class="hint" id="scope-note"></p>
+        <p class="error" id="scope-error" hidden></p>
+        <div id="suggestions" class="suggestions" hidden>
+          <p class="hint">Click a path to scope that change (from git diff or observed source files).</p>
+          <div id="suggestion-list" class="suggestion-list"></div>
+        </div>
         <p class="error" id="ingest-error" hidden></p>
         <div id="service-editor" hidden>
           <h3>What the repository contained</h3>
@@ -110,10 +115,13 @@
           <ul id="missing" class="claims"></ul>
         </article>
         <article class="panel">
-          <h2>Tool trace</h2>
-          <ol id="trace" class="trace"></ol>
+          <h2>Evidence</h2>
+          <p class="hint">Every claim cites one of these rows. Falkor-backed reads only.</p>
+          <ul id="evidence" class="claims evidence-list"></ul>
         </article>
         <article class="panel">
+          <h2>Tool trace</h2>
+          <ol id="trace" class="trace"></ol>
           <h2>Action</h2>
           <p id="action-reason"></p>
           <button type="button" id="act" class="primary">Create issue</button>

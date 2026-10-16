@@ -9,6 +9,15 @@ import typer
 
 from edl.change import ChangeError
 from edl.engine import Engine
+from edl.explore import (
+    explain as explain_node,
+    format_evidence,
+    format_inspect,
+    neighbors as neighbor_card,
+    resolve_node_id,
+    service_cards,
+    shortest_path,
+)
 from edl.ingest import IngestError
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +25,8 @@ POLICY = ROOT / "policies" / "policies.yaml"
 LOG = ROOT / "logs" / "trace.jsonl"
 
 app = typer.Typer(add_completion=False, help="Syzygy engineering decision layer")
+graph_app = typer.Typer(add_completion=False, help="Inspect the repository graph (graphify-style)")
+app.add_typer(graph_app, name="graph")
 
 
 def _engine() -> Engine:
@@ -218,6 +229,144 @@ def mcp_serve() -> None:
     from edl.mcp_server import main as mcp_main
 
     mcp_main()
+
+
+@app.command()
+def explore(
+    target: str,
+    base: Optional[str] = typer.Option(None, help="Git base ref"),
+    head: Optional[str] = typer.Option(None, help="Git head ref"),
+    files: Optional[str] = typer.Option(None, help="Comma-separated modified paths"),
+    mode: str = typer.Option("full", help="full | one_hop | graph_off"),
+    review: bool = typer.Option(True, help="Run review and dump evidence when a change is scoped"),
+) -> None:
+    """Inspect a real repo: services, scope, suggested files, and evidence (like graphify status)."""
+    engine = _loaded(target, base=base, head=head, files=_split_files(files))
+    snap = engine.snapshot()
+    cards = service_cards(engine.graph)
+    for card, service in zip(cards, snap["services"]):
+        card["owner"] = service.get("owner")
+    typer.echo(
+        format_inspect(
+            origin=snap.get("origin"),
+            note=snap.get("note") or "",
+            scope_note=snap.get("scope_note") or "",
+            scope_error=snap.get("scope_error"),
+            suggested_files=snap.get("suggested_files") or [],
+            services=cards,
+            changes=snap.get("changes") or [],
+            backend=snap.get("backend") or "",
+            nodes=snap.get("nodes") or 0,
+            edges=snap.get("edges") or 0,
+        )
+    )
+    if not review or not engine.changes:
+        return
+    selected = engine.changes[0]["id"]
+    payload = engine.review(selected, mode)
+    typer.echo("")
+    typer.echo(format_evidence(payload["runs"][mode]))
+
+
+@graph_app.command("status")
+def graph_status(target: str) -> None:
+    """Graph counts, Falkor status, and scoped change summary."""
+    engine = _loaded(target, files=None)
+    snap = engine.snapshot()
+    remote = snap.get("falkor") or {}
+    typer.echo(f"backend={snap['backend']}  ready={snap.get('graph_ready')}")
+    typer.echo(remote.get("detail") or "")
+    typer.echo(f"nodes={snap['nodes']}  edges={snap['edges']}  services={len(snap['services'])}")
+    typer.echo(snap.get("scope_note") or "")
+    if snap.get("suggested_files"):
+        typer.echo("suggested_files: " + ", ".join(snap["suggested_files"][:10]))
+
+
+@graph_app.command("services")
+def graph_services(target: str) -> None:
+    """List services with owners, deps, and sample source paths."""
+    engine = _loaded(target, files=None)
+    cards = service_cards(engine.graph)
+    owners = {item["name"]: item.get("owner") for item in engine.services()}
+    for card in cards:
+        card["owner"] = owners.get(card["name"])
+        owner = card.get("owner") or "no CODEOWNERS entry"
+        paths = ", ".join(card.get("sample_paths") or []) or "(none)"
+        deps = ", ".join(card.get("depends_on") or []) or "(none)"
+        consumers = ", ".join(card.get("consumers") or []) or "(none)"
+        typer.echo(f"{card['name']}\towner={owner}\tdeps={deps}\tconsumers={consumers}\tfiles={paths}")
+
+
+@graph_app.command("neighbors")
+def graph_neighbors(target: str, node: str) -> None:
+    """Show outgoing and incoming edges for a service or function."""
+    engine = _loaded(target, files=None)
+    node_id = resolve_node_id(engine.graph, node)
+    if not node_id:
+        typer.echo(f"No node matching {node!r}.")
+        raise typer.Exit(code=1)
+    card = neighbor_card(engine.graph, node_id)
+    typer.echo(f"{card['label']} {card['name']} ({card['id']})")
+    for item in card["out"]:
+        typer.echo(f"  -[{item['rel']}]-> {item['name'] or item['id']}")
+    for item in card["inn"]:
+        typer.echo(f"  <-[{item['rel']}]- {item['name'] or item['id']}")
+
+
+@graph_app.command("path")
+def graph_path(target: str, start: str, end: str) -> None:
+    """Shortest path between two nodes (services/functions)."""
+    engine = _loaded(target, files=None)
+    start_id = resolve_node_id(engine.graph, start)
+    end_id = resolve_node_id(engine.graph, end)
+    if not start_id or not end_id:
+        typer.echo(f"Could not resolve path ends: {start!r} -> {start_id}, {end!r} -> {end_id}")
+        raise typer.Exit(code=1)
+    result = shortest_path(engine.graph, start_id, end_id)
+    if not result.get("ok"):
+        typer.echo(result.get("detail") or "No path.")
+        raise typer.Exit(code=1)
+    bits = []
+    nodes = result["nodes"]
+    edges = result.get("edges") or []
+    for index, node_id in enumerate(nodes):
+        node = engine.graph.node(node_id) or {}
+        bits.append(str(node.get("name") or node_id))
+        if index < len(edges):
+            bits.append(f"-[{edges[index]}]->")
+    typer.echo(" ".join(bits))
+    typer.echo(f"hops={result['hops']}")
+
+
+@graph_app.command("explain")
+def graph_explain(target: str, node: str) -> None:
+    """Plain-language explanation of one graph node."""
+    engine = _loaded(target, files=None)
+    node_id = resolve_node_id(engine.graph, node)
+    if not node_id:
+        typer.echo(f"No node matching {node!r}.")
+        raise typer.Exit(code=1)
+    typer.echo(explain_node(engine.graph, node_id)["summary"])
+
+
+@graph_app.command("evidence")
+def graph_evidence(
+    target: str,
+    files: Optional[str] = typer.Option(None, help="Comma-separated modified paths"),
+    base: Optional[str] = typer.Option(None, help="Git base ref"),
+    head: Optional[str] = typer.Option(None, help="Git head ref"),
+    mode: str = typer.Option("full", help="full | one_hop | graph_off"),
+) -> None:
+    """Run a review and print the evidence catalog + claims."""
+    engine = _loaded(target, base=base, head=head, files=_split_files(files))
+    if not engine.changes:
+        snap = engine.snapshot()
+        typer.echo(snap.get("scope_error") or "No change is scoped.")
+        if snap.get("suggested_files"):
+            typer.echo("Try --files " + ",".join(snap["suggested_files"][:4]))
+        raise typer.Exit(code=1)
+    payload = engine.review(engine.changes[0]["id"], mode)
+    typer.echo(format_evidence(payload["runs"][mode]))
 
 
 @app.command()

@@ -98,7 +98,23 @@ def scope_change(body: ScopeIn) -> dict:
             title=body.title,
         )
     except ChangeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        snap = engine.snapshot()
+        detail = str(exc)
+        if snap.get("suggested_files") and "Suggested files" not in detail:
+            shown = ", ".join(snap["suggested_files"][:6])
+            detail = f"{detail} Suggested files from this tree: {shown}."
+        raise HTTPException(status_code=400, detail=detail) from exc
+
+
+@app.get("/api/suggest-files")
+def suggest_files() -> dict:
+    snap = engine.snapshot()
+    return {
+        "suggested_files": snap.get("suggested_files") or [],
+        "scope_error": snap.get("scope_error"),
+        "scope_note": snap.get("scope_note"),
+        "changes": snap.get("changes") or [],
+    }
 
 
 @app.post("/api/review")

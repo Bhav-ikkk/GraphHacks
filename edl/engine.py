@@ -28,6 +28,8 @@ class Engine:
         self.note = "Paste a GitHub URL or a folder path. Nothing is loaded until you do."
         self.ci_configured = False
         self.scope_note = "No change is scoped yet."
+        self.scope_error: str | None = None
+        self.suggested_files: list[str] = []
         self.records: dict[str, dict] = {}
         self.issued: dict[str, dict] = {}
         self.issue_seq = 0
@@ -61,12 +63,16 @@ class Engine:
         self.ci_configured = bool(summary.get("ci_configured"))
         self.issued = {}
         self.scope_note = "No change is scoped yet."
-        scope_error = None
+        self.scope_error = None
+        self.suggested_files = change_scope.suggest_scope_files(self.graph, origin=self.origin)
         try:
             self._scope_change(base=base, head=head, files=files)
+            self.scope_error = None
         except ChangeError as exc:
-            scope_error = str(exc)
-            self.scope_note = scope_error
+            self.scope_error = change_scope.scope_help_message(
+                self.graph, self.origin, reason=str(exc)
+            )
+            self.scope_note = self.scope_error
         nodes, edges = self.graph.counts()
         falkor.publish(self.graph)
         return {
@@ -74,7 +80,8 @@ class Engine:
             "origin": self.origin,
             "note": self.note,
             "scope_note": self.scope_note,
-            "scope_error": scope_error,
+            "scope_error": self.scope_error,
+            "suggested_files": self.suggested_files,
             "nodes": nodes,
             "edges": edges,
             "changes": len(self.changes),
@@ -111,21 +118,40 @@ class Engine:
             paths = explicit
             source = "files"
         elif self.origin.get("kind") == "path":
-            paths, source = change_scope.list_changed_files(
-                Path(self.origin["value"]),
-                base=base,
-                head=head,
-            )
+            try:
+                paths, source = change_scope.list_changed_files(
+                    Path(self.origin["value"]),
+                    base=base,
+                    head=head,
+                )
+            except ChangeError as exc:
+                raise ChangeError(
+                    change_scope.scope_help_message(self.graph, self.origin, reason=str(exc))
+                ) from exc
         elif base or head:
             raise ChangeError(
-                "Git base/head scoping needs a local folder. "
-                "For a GitHub URL, pass explicit files, or clone the repo and analyze the folder."
+                change_scope.scope_help_message(
+                    self.graph,
+                    self.origin,
+                    reason=(
+                        "Git base/head scoping needs a local folder. "
+                        "For a GitHub URL, pass explicit files, or clone the repo and analyze the folder."
+                    ),
+                )
             )
         else:
             raise ChangeError(
-                "No change scope yet. For a local git folder the working tree or HEAD~1..HEAD "
-                "is used automatically when present. Otherwise pass files, or base and head."
+                change_scope.scope_help_message(
+                    self.graph,
+                    self.origin,
+                    reason=(
+                        "No change scope yet. For a local git folder the working tree or "
+                        "HEAD~1..HEAD is used automatically when present. Otherwise pass "
+                        "files, or base and head."
+                    ),
+                )
             )
+        self.suggested_files = change_scope.suggest_scope_files(self.graph, origin=self.origin)
 
         change = change_scope.build_scoped_change(
             self.graph,
@@ -139,6 +165,7 @@ class Engine:
         change_scope.attach_change_node(self.graph, change)
         self.changes = [change]
         self.issued = {}
+        self.scope_error = None
         self.scope_note = change.get("note") or "Change scoped."
         return {
             "change": _public_change(change),
@@ -292,6 +319,8 @@ class Engine:
             "origin": self.origin,
             "note": self.note,
             "scope_note": self.scope_note,
+            "scope_error": self.scope_error,
+            "suggested_files": list(self.suggested_files),
             "nodes": nodes,
             "edges": edges,
             "policy_version": self.policy.get("version"),

@@ -34,6 +34,7 @@ async function api(path, options) {
 
 function showError(id, error) {
   const node = $(id);
+  if (!node) return;
   node.hidden = !error;
   node.textContent = error ? error.message || String(error) : "";
 }
@@ -56,18 +57,63 @@ function scopePayload() {
   return body;
 }
 
+function hasScopeInput() {
+  const body = scopePayload();
+  return Boolean((body.files && body.files.length) || body.base || body.head);
+}
+
+function renderSuggestions(paths) {
+  const wrap = $("suggestions");
+  const list = $("suggestion-list");
+  list.innerHTML = "";
+  const rows = paths || [];
+  wrap.hidden = rows.length === 0;
+  for (const path of rows) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = path;
+    button.addEventListener("click", async () => {
+      $("files").value = path;
+      showError("ingest-error", null);
+      showError("scope-error", null);
+      const rescope = $("rescope");
+      rescope.disabled = true;
+      try {
+        const body = await api("/api/change", {
+          method: "POST",
+          body: JSON.stringify({ files: [path] }),
+        });
+        renderSnapshot(body.snapshot);
+        $("results").hidden = true;
+      } catch (error) {
+        showError("ingest-error", error);
+      } finally {
+        rescope.disabled = snapshot?.dataset !== "repository";
+      }
+    });
+    list.appendChild(button);
+  }
+}
+
 function renderSnapshot(next) {
   snapshot = next;
   $("backend").textContent = next.backend;
   $("origin-note").textContent = next.note || "";
-  $("scope-note").textContent = next.scope_note || "";
+  const scoped = (next.changes || []).length > 0;
+  $("scope-note").textContent = scoped
+    ? next.scope_note || ""
+    : next.scope_note || "No change is scoped yet.";
+  const scopeErr = next.scope_error && !scoped ? next.scope_error : null;
+  showError("scope-error", scopeErr ? new Error(scopeErr) : null);
+  renderSuggestions(next.suggested_files || []);
+
   const change = $("change");
   const previous = change.value;
   change.innerHTML = "";
   if (!next.changes.length) {
     const option = document.createElement("option");
     option.value = "";
-    option.textContent = "Scope a change (files or git base/head)";
+    option.textContent = "Scope a change (click a suggested file, or fill files / base / head)";
     change.appendChild(option);
   }
   for (const item of next.changes) {
@@ -88,6 +134,9 @@ function renderSnapshot(next) {
   services.innerHTML = "";
   $("run").disabled = next.changes.length === 0;
   $("rescope").disabled = next.dataset !== "repository";
+  $("change-help").textContent = scoped
+    ? "One scoped change from the diff or file list — not every function in the tree."
+    : "Graph is loaded. Pick a suggested file below, or enter changed paths, then Rescope.";
   if (next.dataset === "repository") {
     for (const service of next.services) {
       const row = document.createElement("div");
@@ -98,6 +147,43 @@ function renderSnapshot(next) {
       row.append(copy);
       services.appendChild(row);
     }
+  }
+}
+
+function renderEvidence(rows) {
+  const list = $("evidence");
+  list.innerHTML = "";
+  if (!rows || !rows.length) {
+    const item = document.createElement("li");
+    item.textContent = "No evidence rows for this mode.";
+    list.appendChild(item);
+    return;
+  }
+  for (const row of rows) {
+    const item = document.createElement("li");
+    const code = document.createElement("span");
+    code.className = "eid";
+    code.textContent = row.id;
+    const meta = document.createElement("span");
+    meta.className = "evidence-meta";
+    const bits = [row.evidence_type, row.role, row.source_system].filter(Boolean);
+    if (row.freshness_ok === false) bits.push("stale");
+    if (row.freshness_ok === true) bits.push("fresh");
+    meta.textContent = bits.join(" · ");
+    item.append(code, meta);
+    if (row.detail) {
+      const detail = document.createElement("span");
+      detail.className = "detail";
+      detail.textContent = row.detail;
+      item.appendChild(detail);
+    }
+    if (row.limitations) {
+      const limit = document.createElement("span");
+      limit.className = "detail";
+      limit.textContent = `limitation: ${row.limitations}`;
+      item.appendChild(limit);
+    }
+    list.appendChild(item);
   }
 }
 
@@ -142,6 +228,7 @@ function renderRecord(payload, mode) {
     ? record.missing
     : [{ evidence_id: "—", detail: "Nothing required was missing or stale." }];
   renderList("missing", missing, (item) => item.detail, (item) => item.evidence_id || item.policy);
+  renderEvidence(record.evidence || []);
 
   const trace = $("trace");
   trace.innerHTML = "";
@@ -239,6 +326,10 @@ function drawGraph(graph) {
 
 async function runReview() {
   showError("review-error", null);
+  if (!$("change").value) {
+    showError("review-error", new Error("Scope a change first (suggested file, --files, or git base/head)."));
+    return;
+  }
   const button = $("run");
   button.disabled = true;
   try {
@@ -250,7 +341,7 @@ async function runReview() {
   } catch (error) {
     showError("review-error", error);
   } finally {
-    button.disabled = false;
+    button.disabled = snapshot?.changes?.length === 0;
   }
 }
 
@@ -262,6 +353,7 @@ async function boot() {
 $("ingest-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   showError("ingest-error", null);
+  showError("scope-error", null);
   const target = $("target").value.trim();
   const button = event.submitter || $("ingest-form").querySelector("button");
   if (!target) {
@@ -288,6 +380,23 @@ $("ingest-form").addEventListener("submit", async (event) => {
 $("rescope").addEventListener("click", async () => {
   showError("ingest-error", null);
   showError("review-error", null);
+  showError("scope-error", null);
+  if (!hasScopeInput() && !(snapshot?.suggested_files || []).length) {
+    showError(
+      "ingest-error",
+      new Error(
+        "Add changed files or git base/head first. After Analyze, suggested paths appear when the tree has source files."
+      )
+    );
+    return;
+  }
+  if (!hasScopeInput() && (snapshot?.suggested_files || []).length) {
+    showError(
+      "ingest-error",
+      new Error("Click a suggested file below, or paste paths into Changed files, then Rescope.")
+    );
+    return;
+  }
   const button = $("rescope");
   button.disabled = true;
   try {

@@ -64,6 +64,51 @@ def list_changed_files(
     )
 
 
+def suggest_scope_files(
+    graph: MemoryGraph,
+    *,
+    origin: dict | None = None,
+    limit: int = 12,
+) -> list[str]:
+    """Paths the UI/CLI can offer when auto-git scope finds nothing.
+
+    Prefers real git diffs on a local folder, then sample source paths stored
+    on Service nodes during ingest. Never invents paths that were not observed.
+    """
+    if origin and origin.get("kind") == "path":
+        root = Path(origin["value"])
+        try:
+            paths, _how = list_changed_files(root)
+            if paths:
+                return paths[:limit]
+        except ChangeError:
+            pass
+
+    samples: list[str] = []
+    for service in graph.by_label("Service"):
+        if service.get("name") == "__repo__":
+            continue
+        for path in service.get("sample_paths") or []:
+            if path not in samples:
+                samples.append(path)
+            if len(samples) >= limit:
+                return samples
+    return samples[:limit]
+
+
+def scope_help_message(graph: MemoryGraph, origin: dict | None = None, *, reason: str) -> str:
+    """Human-readable scope failure with concrete file suggestions when available."""
+    hints = suggest_scope_files(graph, origin=origin)
+    if hints:
+        shown = ", ".join(hints[:6])
+        extra = f" (+{len(hints) - 6} more)" if len(hints) > 6 else ""
+        return f"{reason} Suggested files from this tree: {shown}{extra}."
+    return (
+        f"{reason} Pass explicit files (comma-separated paths), or for a local git "
+        "folder use base/head when a diff exists."
+    )
+
+
 def build_scoped_change(
     graph: MemoryGraph,
     files: list[str],

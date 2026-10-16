@@ -273,6 +273,11 @@ def build_graph(detected: dict) -> MemoryGraph:
     test_paths = detected.get("test_paths") or []
     for service in detected["services"]:
         name = service["name"]
+        sample_paths = [
+            path
+            for path in (service.get("paths") or [])
+            if path.endswith(SOURCE_SUFFIXES) and not _looks_like_test(path)
+        ][:8]
         graph.add_node(
             {
                 "id": f"svc:{name}",
@@ -286,6 +291,7 @@ def build_graph(detected: dict) -> MemoryGraph:
                 "observed_at": OBSERVED_AT,
                 "confidence": 1,
                 "root": bool(service.get("root")),
+                "sample_paths": sample_paths,
             }
         )
         graph.add_edge(f"svc:{name}", "IN_REPO", "repo:selected", source="repository", evidence_type="observed")

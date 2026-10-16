@@ -29,6 +29,35 @@ python -m edl eval
 `python -m edl eval` runs labeled scenarios (safe / risky / uncertain) and scores
 **unjustified PROCEED** plus graph lift vs graph-off. Fixtures never load into the live server.
 
+### Agent + MCP (Track 01)
+
+```powershell
+# Offline agent (graph tools → decide → gate), no network
+python -m edl agent --scenario graph_necessary_incident_hold
+
+# Agent on a local repo + scoped files
+python -m edl agent C:\path\to\repo --files payments/charge.py
+
+# MCP stdio server for Cursor / Claude Desktop
+python -m edl mcp
+```
+
+Cursor MCP example (`mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "syzygy-edl": {
+      "command": "python",
+      "args": ["-m", "edl", "mcp"],
+      "cwd": "C:\\Users\\HP\\Desktop\\Projects\\big_projects\\FlakorDB_Hackathon"
+    }
+  }
+}
+```
+
+Named tools only (impact, owner, incidents, tests, deploy, callers, decide, action). No free-text Cypher.
+
 ## FalkorDB
 
 FalkorDB is the decision backbone. Reviews read blast radius, owners, tests, deploys, and incidents through named Cypher tools. If FalkorDB is not connected, the product fails closed with **insufficient evidence** — it does not invent a safe decision from an in-memory copy.

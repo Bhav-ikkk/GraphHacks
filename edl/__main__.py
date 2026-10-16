@@ -179,6 +179,48 @@ def evaluate(
 
 
 @app.command()
+def agent(
+    target: Optional[str] = typer.Argument(None, help="GitHub URL or local folder"),
+    files: Optional[str] = typer.Option(None, help="Comma-separated changed paths"),
+    base: Optional[str] = typer.Option(None, help="Git base ref"),
+    head: Optional[str] = typer.Option(None, help="Git head ref"),
+    scenario: Optional[str] = typer.Option(
+        None, help="Offline eval scenario id (no network)"
+    ),
+    mode: str = typer.Option("full", help="full | one_hop | graph_off"),
+    act: bool = typer.Option(False, help="Execute gated local issue when allowed"),
+    hops: int = typer.Option(3, help="Blast-radius hop limit"),
+) -> None:
+    """Run the graph-backed change agent (tool selection → decide → gate)."""
+    from edl.agent import format_agent_report, run_agent
+
+    if not scenario and not target:
+        typer.echo("Pass a repository target, or --scenario <id> for an offline fixture.")
+        raise typer.Exit(code=1)
+    result = run_agent(
+        target,
+        files=_split_files(files),
+        base=base,
+        head=head,
+        mode=mode,
+        execute_action=act,
+        hops=hops,
+        scenario=scenario,
+    )
+    typer.echo(format_agent_report(result))
+    if not result.get("ok"):
+        raise typer.Exit(code=1)
+
+
+@app.command("mcp")
+def mcp_serve() -> None:
+    """Start the MCP stdio server (graph tools for Cursor / Claude / agents)."""
+    from edl.mcp_server import main as mcp_main
+
+    mcp_main()
+
+
+@app.command()
 def serve(port: int = 8000) -> None:
     """Start the review UI. It stays empty until you analyze a repository."""
     import uvicorn

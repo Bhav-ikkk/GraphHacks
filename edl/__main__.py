@@ -224,11 +224,17 @@ def agent(
 
 
 @app.command("mcp")
-def mcp_serve() -> None:
+def mcp_serve(
+    check: bool = typer.Option(
+        False,
+        "--check",
+        help="Print a self-check and exit. A terminal does this automatically.",
+    ),
+) -> None:
     """Start the MCP stdio server (graph tools for Cursor / Claude / agents)."""
     from edl.mcp_server import main as mcp_main
 
-    mcp_main()
+    mcp_main(check=check)
 
 
 @app.command()

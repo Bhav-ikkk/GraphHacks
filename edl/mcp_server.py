@@ -142,8 +142,61 @@ def _error(msg_id: Any, code: int, message: str) -> dict:
     return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
 
 
-def main() -> None:
+def main(check: bool = False) -> None:
+    """Serve hosts on stdin. A person at a terminal gets a self-check instead of a hang."""
+    if check or _stdin_is_terminal():
+        sys.stdout.write(terminal_report())
+        return
     serve_stdio()
+
+
+def terminal_report() -> str:
+    """Prove the server can list its tools, and show how a person uses the product."""
+    server = McpServer()
+    init = server.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "terminal", "version": "0"},
+            },
+        }
+    )
+    listed = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+    info = (init or {}).get("result", {}).get("serverInfo") or SERVER_INFO
+    tools = (listed or {}).get("result", {}).get("tools") or []
+    names = "\n".join(f"  - {tool['name']}" for tool in tools)
+    return (
+        f"Syzygy MCP self-check\n"
+        f"  server: {info.get('name')} {info.get('version')}\n"
+        f"  protocol: {PROTOCOL_VERSION}\n"
+        f"  tools: {len(tools)}\n"
+        f"{names}\n"
+        "\n"
+        "This command is a stdio server, not a chat. Typed alone, it waits for\n"
+        "JSON-RPC on stdin and prints nothing, which looks frozen. Cursor, VS Code,\n"
+        "Claude Code, and Codex start it from their config and own that stream.\n"
+        "\n"
+        "How a person uses the product:\n"
+        "  python -m edl agent --scenario graph_necessary_incident_hold\n"
+        "  python -m edl agent C:\\path\\to\\repo --files payments/charge.py\n"
+        "\n"
+        "In Cursor chat, with the syzygy-edl server enabled, ask:\n"
+        "  Ingest this repo, scope payments/charge.py, and decide the change.\n"
+        "\n"
+        "On Windows, py skips the active venv. Prefer:\n"
+        "  .\\.venv\\Scripts\\python.exe -m edl mcp\n"
+    )
+
+
+def _stdin_is_terminal() -> bool:
+    try:
+        return bool(sys.stdin.isatty())
+    except Exception:
+        return False
 
 
 if __name__ == "__main__":

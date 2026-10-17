@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "syzygy-edl": {
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "args": ["-m", "edl", "mcp"]
+    }
+  }
+}

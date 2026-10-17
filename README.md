@@ -4,7 +4,7 @@ Engineering decision layer for a code change. You choose the repository. The sca
 
 A git repository does not contain CI run results, deployment health, or incidents. Those stay missing, and the state stays **insufficient evidence**, until a real source is connected. The explanation text cannot upgrade the state.
 
-The full walkthrough is in [docs/README.md](docs/README.md).
+**Teammate onboarding (what / why / how + diagrams):** open [`docs/teammate-guide.html`](docs/teammate-guide.html) in a browser.
 
 ## Run it
 
@@ -25,6 +25,19 @@ python -m edl ingest https://github.com/owner/name --files path/to/changed.py
 python -m edl review https://github.com/owner/name --files path/to/changed.py
 python -m edl eval
 ```
+
+Inspect a real repo the way you would with graphify (status, path, evidence):
+
+```powershell
+python -m edl explore C:\path\to\repo --files payments/charge.py
+python -m edl graph status C:\path\to\repo
+python -m edl graph services C:\path\to\repo
+python -m edl graph path C:\path\to\repo checkout payments
+python -m edl graph explain C:\path\to\repo payments
+python -m edl graph evidence C:\path\to\repo --files payments/charge.py
+```
+
+In the UI: Analyze the repo → click a **suggested file** (or paste paths) → Run review. The Evidence panel lists every catalog row claims cite. Empty Rescope no longer silently 400s — it tells you what to pass.
 
 `python -m edl eval` runs labeled scenarios (safe / risky / uncertain) and scores
 **unjustified PROCEED** plus graph lift vs graph-off. Fixtures never load into the live server.

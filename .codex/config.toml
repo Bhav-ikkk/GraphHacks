@@ -1,0 +1,4 @@
+[mcp_servers.syzygy-edl]
+command = "C:/Users/HP/Desktop/Projects/big_projects/FlakorDB_Hackathon/.venv/Scripts/python.exe"
+args = ["-m", "edl", "mcp"]
+cwd = "C:/Users/HP/Desktop/Projects/big_projects/FlakorDB_Hackathon"

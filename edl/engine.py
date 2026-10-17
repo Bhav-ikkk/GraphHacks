@@ -30,6 +30,8 @@ class Engine:
         self.scope_note = "No change is scoped yet."
         self.scope_error: str | None = None
         self.suggested_files: list[str] = []
+        self.evidence_overlay: dict = {}
+        self.evidence_notes: list[str] = []
         self.records: dict[str, dict] = {}
         self.issued: dict[str, dict] = {}
         self.issue_seq = 0
@@ -61,6 +63,8 @@ class Engine:
         self.origin = summary["origin"]
         self.note = summary["note"]
         self.ci_configured = bool(summary.get("ci_configured"))
+        self.evidence_overlay = dict(summary.get("evidence_overlay") or {})
+        self.evidence_notes = list(summary.get("evidence_notes") or [])
         self.issued = {}
         self.scope_note = "No change is scoped yet."
         self.scope_error = None
@@ -162,6 +166,10 @@ class Engine:
             ci_configured=self.ci_configured,
             title=title,
         )
+        if self.evidence_overlay:
+            from edl.evidence_overlay import apply_to_change
+
+            change = apply_to_change(change, self.evidence_overlay)
         change_scope.attach_change_node(self.graph, change)
         self.changes = [change]
         self.issued = {}

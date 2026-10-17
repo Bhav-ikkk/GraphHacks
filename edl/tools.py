@@ -240,16 +240,19 @@ def _ingest(ctx: ToolContext, args: dict) -> dict:
         head=args.get("head"),
         files=files if isinstance(files, list) else None,
     )
+    snap = ctx.engine.snapshot()
     return _envelope(
         tool="ingest_repository",
-        backend=ctx.engine.snapshot()["backend"],
+        backend=snap["backend"],
         result={
             "origin": summary.get("origin"),
             "nodes": summary.get("nodes"),
             "edges": summary.get("edges"),
-            "changes": summary.get("changes"),
+            "change_count": summary.get("changes"),
+            "changes": snap.get("changes") or [],
             "scope_note": summary.get("scope_note"),
             "services": [row["name"] for row in summary.get("services") or []],
+            "evidence_notes": list(getattr(ctx.engine, "evidence_notes", []) or []),
         },
         limitations=summary.get("scope_error"),
         partial=bool(summary.get("scope_error")),

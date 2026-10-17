@@ -223,8 +223,9 @@ function renderSnapshot(next) {
 
   // Update Repo Trigger Pill Label
   const repoNameEl = $("repo-pill-name");
-  if (repoNameEl && next.origin?.value) {
-    repoNameEl.textContent = next.origin.value;
+  if (repoNameEl) {
+    repoNameEl.textContent = next.origin?.value
+      || "No repository yet — Analyze a GitHub URL or folder";
   }
 
   $("origin-note").textContent = next.note || "";

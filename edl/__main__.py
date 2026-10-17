@@ -7,7 +7,7 @@ from typing import Optional
 
 import typer
 
-from edl.branding import PRODUCT_LONG, VERSION, banner
+from edl.branding import PRODUCT_LONG, VERSION, banner, usage
 from edl.change import ChangeError
 from edl.cli_report import format_decision_report, format_ingest_report, format_status
 from edl.engine import Engine
@@ -28,8 +28,8 @@ LOG = ROOT / "logs" / "trace.jsonl"
 
 app = typer.Typer(
     add_completion=False,
-    no_args_is_help=True,
-    help=f"{PRODUCT_LONG} — graph-backed engineering decisions on FalkorDB",
+    invoke_without_command=True,
+    help=f"{PRODUCT_LONG} - graph-backed engineering decisions on FalkorDB",
 )
 graph_app = typer.Typer(
     add_completion=False,
@@ -50,6 +50,7 @@ def _split_files(files: Optional[str]) -> list[str] | None:
 
 @app.callback()
 def main(
+    ctx: typer.Context,
     version: bool = typer.Option(
         False,
         "--version",
@@ -61,6 +62,10 @@ def main(
     """Syzygy EDL command line."""
     if version:
         typer.echo(f"{PRODUCT_LONG} {VERSION}")
+        raise typer.Exit()
+    if ctx.invoked_subcommand is None:
+        typer.echo(banner())
+        typer.echo(usage())
         raise typer.Exit()
 
 
@@ -86,6 +91,7 @@ def ingest(
         raise typer.Exit(code=1)
     typer.echo(format_ingest_report(engine, summary))
     if not engine.snapshot().get("graph_ready"):
+        typer.echo("\nFalkorDB is not ready. Fix .env (host/password) then re-run ingest.")
         raise typer.Exit(code=1)
 
 

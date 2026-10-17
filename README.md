@@ -12,28 +12,50 @@ A bare git tree does not contain CI runs, deploy health, or incidents. Those sta
 
 **Teammate onboarding:** open [`docs/teammate-guide.html`](docs/teammate-guide.html).
 
-## Ship demo (this repository)
+## Install (Windows)
 
 ```powershell
+cd C:\Users\HP\Desktop\Projects\big_projects\FlakorDB_Hackathon
 python -m venv .venv
-.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-copy .env.example .env   # set FALKORDB_PASSWORD
-python -m pytest
+pip install -e .          # installs `syzygy` and `edl` commands
+copy .env.example .env    # set FALKORDB_PASSWORD + Gemini key
 ```
 
-```powershell
-# Real repo + FalkorDB + agent (expect HOLD from open incident on svc:edl)
-python -m edl agent . --files edl/agent.py
+Prefer the venv python (or `syzygy` after `pip install -e .`). On Windows, bare `py -m edl` can skip the venv — use:
 
-# Same loop; model chooses tools when SYZYGY_LLM_* is set, else local planner
+```powershell
+.\.venv\Scripts\python.exe -m edl --version
+# or after editable install:
+syzygy --version
+```
+
+## Product CLI (real repos)
+
+```powershell
+# 0) Product + Falkor readiness
+python -m edl --version
+python -m edl status
+
+# 1) Publish a repo graph to FalkorDB (no decision yet)
+python -m edl ingest .
+python -m edl ingest https://github.com/owner/name
+
+# 2) Full product report: graph → decide → claims → agent node pack
+python -m edl report . --files edl/agent.py
+python -m edl report C:\path\to\other-repo --files src/main.py
+python -m edl report https://github.com/owner/name --files path/file.py
+
+# 3) Agent (Gemini when .env has SYZYGY_LLM_*)
 python -m edl agent . --files edl/agent.py --llm
 
-# UI
+# 4) UI
 python -m edl serve
+# → http://127.0.0.1:8000  Analyze → scope files → Run review
 ```
 
-Open http://127.0.0.1:8000 → Analyze `.` → scope `edl/agent.py` → Run review.
+Exit codes for `report`: `0` proceed/guards, `2` hold/review/insufficient, `1` hard error.
 
 Offline graph-lift proof (fixture only, not the live product):
 

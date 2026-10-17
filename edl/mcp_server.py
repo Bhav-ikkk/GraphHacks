@@ -182,6 +182,7 @@ def terminal_report() -> str:
         "\n"
         "How a person uses the product:\n"
         "  python -m edl agent --scenario graph_necessary_incident_hold\n"
+        "  python -m edl agent --scenario graph_necessary_incident_hold --llm\n"
         "  python -m edl agent C:\\path\\to\\repo --files payments/charge.py\n"
         "\n"
         "In Cursor chat, with the syzygy-edl server enabled, ask:\n"

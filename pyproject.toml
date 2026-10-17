@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "syzygy-edl"
+version = "0.2.0"
+description = "Syzygy EDL — graph-backed engineering decisions on FalkorDB"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi==0.115.6",
+  "uvicorn==0.34.0",
+  "pyyaml==6.0.2",
+  "typer==0.15.1",
+  "click>=8.1.7,<8.2",
+  "falkordb==1.1.2",
+]
+
+[project.scripts]
+syzygy = "edl.__main__:run"
+edl = "edl.__main__:run"
+
+[tool.setuptools.packages.find]
+include = ["edl*"]

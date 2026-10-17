@@ -34,7 +34,7 @@ SKIP_DIRS = {
     "doc",
     "examples",
 }
-IGNORE_AS_SERVICE = SKIP_DIRS | {".github"}
+IGNORE_AS_SERVICE = SKIP_DIRS | {".github", "tests", "test", "scratch", "scripts", "tools"}
 CODE_MARKERS = ("Dockerfile", "dockerfile", "go.mod", "package.json", "pyproject.toml", "pom.xml", "Cargo.toml")
 COMPOSE_NAMES = {"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}
 SERVICE_ROOTS = {"services", "apps", "packages", "cmd"}
@@ -80,13 +80,36 @@ def ingest(value: str) -> tuple[MemoryGraph, dict]:
             "and folders under services/, apps/, packages/, or cmd/."
         )
     graph = build_graph(detected)
+    overlay_notes: list[str] = []
+    overlay = dict(detected.get("evidence_overlay") or {})
+    if overlay:
+        from edl.evidence_overlay import apply_to_graph
+
+        overlay_notes = apply_to_graph(graph, overlay)
+    origin = detected["origin"]
+    if origin.get("kind") == "path":
+        from edl.calls import add_python_calls
+
+        call_count = add_python_calls(graph, Path(origin["value"]))
+        if call_count:
+            overlay_notes.append(f"calls:{call_count}")
+    from edl.ci_actions import enrich_overlay_with_actions
+
+    overlay, action_notes = enrich_overlay_with_actions(overlay, origin)
+    overlay_notes.extend(action_notes)
+    if action_notes and overlay.get("ci"):
+        # Re-apply CI onto the change later via overlay; graph deploys/incidents
+        # already applied above from the file before Actions merge.
+        pass
     summary = {
-        "origin": detected["origin"],
+        "origin": origin,
         "service_count": len(detected["services"]),
         "dependency_count": len(detected["depends"]),
         "owner_rules": len(detected.get("codeowners") or []),
-        "ci_configured": bool(detected.get("ci_configured")),
+        "ci_configured": bool(detected.get("ci_configured") or (overlay.get("ci") or {}).get("configured")),
         "note": _note(detected),
+        "evidence_overlay": overlay,
+        "evidence_notes": overlay_notes,
     }
     return graph, summary
 
@@ -116,6 +139,9 @@ def detect_local(root: Path) -> dict:
     detected["codeowners"] = _read_local_codeowners(root)
     detected["ci_configured"] = _ci_configured(paths)
     detected["test_paths"] = [path for path in paths if _looks_like_test(path)]
+    from edl.evidence_overlay import load_overlay
+
+    detected["evidence_overlay"] = load_overlay(root)
     return detected
 
 
@@ -141,6 +167,7 @@ def detect_github(owner: str, name: str) -> dict:
     detected["codeowners"] = _github_codeowners(owner, name, branch, paths)
     detected["ci_configured"] = _ci_configured(paths)
     detected["test_paths"] = [path for path in paths if _looks_like_test(path)]
+    detected["evidence_overlay"] = {}
     return detected
 
 
@@ -198,28 +225,29 @@ def _assemble(paths: list[str], compose: dict | None, functions: dict[str, list[
                     ensure(child)["paths"].append(path)
 
     services.pop("_skip", None)
-    if not services:
-        top: dict[str, int] = {}
-        for path in paths:
-            parts = [part for part in path.split("/") if part and part not in IGNORE_AS_SERVICE]
-            if len(parts) < 2:
-                continue
-            if parts[-1].endswith(SOURCE_SUFFIXES):
-                top[parts[0]] = top.get(parts[0], 0) + 1
-        for name, count in top.items():
-            if count:
-                ensure(name)
-        root_files = [
-            path
-            for path in paths
-            if "/" not in path and path.endswith(SOURCE_SUFFIXES) and not _looks_like_test(path)
-        ]
-        if root_files:
-            bucket = ensure(ROOT_SERVICE)
-            bucket["root"] = True
-            for path in root_files:
-                if path not in bucket["paths"]:
-                    bucket["paths"].append(path)
+    # Always discover top-level code folders. A root pyproject.toml / package.json
+    # must not hide packages such as edl/ or web/.
+    top: dict[str, int] = {}
+    for path in paths:
+        parts = [part for part in path.split("/") if part and part not in IGNORE_AS_SERVICE]
+        if len(parts) < 2:
+            continue
+        if parts[-1].endswith(SOURCE_SUFFIXES) and not _looks_like_test(path):
+            top[parts[0]] = top.get(parts[0], 0) + 1
+    for name, count in top.items():
+        if count:
+            ensure(name)
+    root_files = [
+        path
+        for path in paths
+        if "/" not in path and path.endswith(SOURCE_SUFFIXES) and not _looks_like_test(path)
+    ]
+    if root_files:
+        bucket = ensure(ROOT_SERVICE)
+        bucket["root"] = True
+        for path in root_files:
+            if path not in bucket["paths"]:
+                bucket["paths"].append(path)
 
     ranked = sorted(
         (service for service in services.values() if service["name"] != "_skip"),
@@ -232,11 +260,21 @@ def _assemble(paths: list[str], compose: dict | None, functions: dict[str, list[
             continue
         if path not in service["paths"]:
             service["paths"].append(path)
+        units = service.setdefault("function_units", [])
+        seen = {(row["path"], row["name"]) for row in units}
         for name in names:
+            key = (path, name)
+            if key in seen:
+                continue
+            units.append({"name": name, "path": path})
+            seen.add(key)
             if name not in service["functions"]:
                 service["functions"].append(name)
     for service in ordered:
-        service["functions"] = service["functions"][:8]
+        # Keep path-bound units for every source file. Flat name list is a short index.
+        units = service.get("function_units") or []
+        service["function_units"] = units[:120]
+        service["functions"] = [row["name"] for row in service["function_units"]]
 
     depends = []
     if compose:
@@ -297,12 +335,24 @@ def build_graph(detected: dict) -> MemoryGraph:
         graph.add_edge(f"svc:{name}", "IN_REPO", "repo:selected", source="repository", evidence_type="observed")
         _attach_owners(graph, f"svc:{name}", _owners_for_service(service, rules))
 
-        units = service["functions"] or [name]
-        granularities = ["function"] * len(service["functions"]) or ["service"]
+        function_units = service.get("function_units") or [
+            {"name": fname, "path": None} for fname in (service.get("functions") or [])
+        ]
+        if not function_units:
+            function_units = [{"name": name, "path": None, "granularity": "service"}]
         service_tests = [path for path in test_paths if _service_for_path([service], path)]
-        for fname, granularity in zip(units, granularities):
+        for unit in function_units:
+            fname = unit["name"]
+            granularity = unit.get("granularity") or "function"
+            source_path = unit.get("path")
             symbol = name if granularity == "service" else f"{name}.{fname}"
             fid = f"fn:{symbol}"
+            # Same symbol can appear in one file; keep the first path-bound node.
+            if graph.node(fid) is not None:
+                existing = graph.node(fid)
+                if source_path and not existing.get("path"):
+                    existing["path"] = source_path
+                continue
             graph.add_node(
                 {
                     "id": fid,
@@ -310,6 +360,7 @@ def build_graph(detected: dict) -> MemoryGraph:
                     "name": symbol,
                     "service": name,
                     "fname": fname,
+                    "path": source_path,
                     "granularity": granularity,
                     "source": "repository",
                     "evidence_type": "observed",
@@ -319,12 +370,20 @@ def build_graph(detected: dict) -> MemoryGraph:
                 }
             )
             graph.add_edge(fid, "PART_OF", f"svc:{name}", source="repository", evidence_type="observed")
-            if service_tests:
+            covering = [
+                path
+                for path in service_tests
+                if source_path is None
+                or Path(path).stem.replace("test_", "").replace("_test", "")
+                == Path(source_path).stem
+                or Path(source_path).stem in path
+            ] or service_tests[:1]
+            if covering:
                 graph.add_node(
                     {
                         "id": f"test:{symbol}",
                         "label": "Test",
-                        "name": service_tests[0],
+                        "name": covering[0],
                         "status": "not-run",
                         "source": "repository",
                         "evidence_type": "observed",
@@ -427,9 +486,18 @@ def _bind_repo_service(detected: dict, repo_name: str) -> None:
         for path in root["paths"]:
             if path not in existing["paths"]:
                 existing["paths"].append(path)
-        for fname in root["functions"]:
-            if fname not in existing["functions"]:
-                existing["functions"].append(fname)
+        units = existing.setdefault("function_units", [])
+        seen = {(row.get("path"), row["name"]) for row in units}
+        for unit in root.get("function_units") or [
+            {"name": fname, "path": None} for fname in root.get("functions") or []
+        ]:
+            key = (unit.get("path"), unit["name"])
+            if key in seen:
+                continue
+            units.append(unit)
+            seen.add(key)
+            if unit["name"] not in existing["functions"]:
+                existing["functions"].append(unit["name"])
         existing["root"] = True
         services.remove(root)
         return
@@ -611,10 +679,18 @@ def _merge_functions(services: list[dict], functions: dict[str, list[str]]) -> N
             continue
         if path not in service["paths"]:
             service["paths"].append(path)
+        units = service.setdefault("function_units", [])
+        seen = {(row["path"], row["name"]) for row in units}
         for fname in names:
+            key = (path, fname)
+            if key in seen:
+                continue
+            units.append({"name": fname, "path": path})
+            seen.add(key)
             if fname not in service["functions"]:
                 service["functions"].append(fname)
-        service["functions"] = service["functions"][:8]
+        service["function_units"] = units[:120]
+        service["functions"] = [row["name"] for row in service["function_units"]]
 
 
 _JS_CLASS = re.compile(r"^class\s+([A-Za-z_$][\w$]*)")

@@ -279,6 +279,7 @@ def service_for_path(services: list[dict], path: str) -> dict | None:
 
 
 def symbols_for_path(functions: list[dict], service_name: str, path: str) -> list[str]:
+    """Return symbols defined in this file — never every function in the service."""
     path = _norm(path)
     stem = Path(path).stem
     stem_key = _slug(stem)
@@ -286,23 +287,32 @@ def symbols_for_path(functions: list[dict], service_name: str, path: str) -> lis
     if not svc_fns:
         return []
 
+    by_path = [
+        node["name"]
+        for node in svc_fns
+        if _norm(str(node.get("path") or "")) == path and node.get("granularity") != "service"
+    ]
+    if by_path:
+        return _unique(by_path)
+
+    # Legacy nodes without path: only accept exact file-stem == function name.
     exact = []
     for node in svc_fns:
-        fname = str(node.get("fname") or "")
-        fname_key = _slug(fname)
-        if fname_key == stem_key:
-            exact.append(node["name"])
-        elif stem_key and (stem_key in fname_key or fname_key in stem_key):
+        if node.get("path"):
+            continue
+        fname_key = _slug(str(node.get("fname") or ""))
+        if fname_key and fname_key == stem_key:
             exact.append(node["name"])
     if exact:
         return _unique(exact)
 
-    # File maps to the service but not a specific symbol: scope the service folder
-    # unit if ingest created one, otherwise every function in that service.
-    folder = [node["name"] for node in svc_fns if node.get("granularity") == "service"]
-    if folder:
-        return _unique(folder)
-    return _unique([node["name"] for node in svc_fns])
+    folder = [
+        node["name"]
+        for node in svc_fns
+        if node.get("granularity") == "service"
+        and (not node.get("path") or _norm(str(node.get("path") or "")) == path)
+    ]
+    return _unique(folder)
 
 
 def _git_ok(root: Path) -> bool:

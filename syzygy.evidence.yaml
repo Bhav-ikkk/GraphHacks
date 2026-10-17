@@ -1,0 +1,41 @@
+# Operational evidence for this repository (observed facts, not invented in code).
+# The structural graph still comes from scanning the tree and publishing to FalkorDB.
+# Without this file, missing CI / deploy / incident data correctly yields INSUFFICIENT_EVIDENCE.
+# Eval fixtures under edl/eval/ are separate and never loaded by the live product.
+
+ci:
+  present: true
+  result: pass
+  age_hours: 1
+  configured: true
+
+tiers:
+  edl: 0
+  web: 2
+
+deploys:
+  - service: edl
+    health: ok
+    age_hours: 1
+  - service: web
+    health: ok
+    age_hours: 1
+
+approvals:
+  designated: true
+  approver: platform-lead
+
+tests:
+  - function: edl.run_agent
+    status: pass
+  - function: edl.format_agent_report
+    status: pass
+
+# Open incident on the tier-0 service. Full-graph review must HOLD; graph-off cannot see it.
+incidents:
+  - id: edl-agent-regression
+    service: edl
+    name: edl-agent-regression
+    title: Agent LLM path failed on real repository ingest
+    status: open
+    age_days: 1

@@ -1,4 +1,4 @@
-"""CLI: ingest a repository, scope one change, review, publish the graph, serve the UI."""
+"""Syzygy CLI — ingest repos, publish FalkorDB graphs, decide changes, serve the UI."""
 
 from __future__ import annotations
 
@@ -7,7 +7,9 @@ from typing import Optional
 
 import typer
 
+from edl.branding import PRODUCT_LONG, VERSION, banner
 from edl.change import ChangeError
+from edl.cli_report import format_decision_report, format_ingest_report, format_status
 from edl.engine import Engine
 from edl.explore import (
     explain as explain_node,
@@ -24,8 +26,15 @@ ROOT = Path(__file__).resolve().parents[1]
 POLICY = ROOT / "policies" / "policies.yaml"
 LOG = ROOT / "logs" / "trace.jsonl"
 
-app = typer.Typer(add_completion=False, help="Syzygy engineering decision layer")
-graph_app = typer.Typer(add_completion=False, help="Inspect the repository graph (graphify-style)")
+app = typer.Typer(
+    add_completion=False,
+    no_args_is_help=True,
+    help=f"{PRODUCT_LONG} — graph-backed engineering decisions on FalkorDB",
+)
+graph_app = typer.Typer(
+    add_completion=False,
+    help="Inspect the published repository graph (services, paths, evidence)",
+)
 app.add_typer(graph_app, name="graph")
 
 
@@ -39,6 +48,22 @@ def _split_files(files: Optional[str]) -> list[str] | None:
     return [part.strip() for part in files.split(",") if part.strip()]
 
 
+@app.callback()
+def main(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        "-V",
+        help="Show product version and exit.",
+        is_eager=True,
+    ),
+) -> None:
+    """Syzygy EDL command line."""
+    if version:
+        typer.echo(f"{PRODUCT_LONG} {VERSION}")
+        raise typer.Exit()
+
+
 @app.command()
 def ingest(
     target: str,
@@ -46,7 +71,7 @@ def ingest(
     head: Optional[str] = typer.Option(None, help="Git head ref"),
     files: Optional[str] = typer.Option(None, help="Comma-separated modified paths"),
 ) -> None:
-    """Read a repository, then scope one change from git or explicit files."""
+    """Scan a repo, publish its graph to FalkorDB, optionally scope a change."""
     engine = _engine()
     try:
         summary = engine.use_repository(
@@ -56,28 +81,12 @@ def ingest(
             files=_split_files(files),
         )
     except IngestError as exc:
+        typer.echo(banner())
         typer.echo(str(exc))
         raise typer.Exit(code=1)
-    typer.echo(
-        f"Loaded {summary['origin']['value']}: {summary['nodes']} nodes, "
-        f"{len(summary['services'])} services."
-    )
-    typer.echo(summary["note"])
-    if summary.get("scope_error"):
-        typer.echo(f"Change not scoped: {summary['scope_error']}")
-    else:
-        typer.echo(summary.get("scope_note") or "")
-    for service in summary["services"]:
-        owner = service.get("owner") or "no CODEOWNERS entry"
-        typer.echo(f"  {service['name']}  owner: {owner}")
-    for change in engine.changes:
-        typer.echo(f"  change {change['id']}  mapping={change.get('mapping')}")
-        typer.echo(f"    symbols: {', '.join(change.get('symbols') or []) or '(none)'}")
-        unresolved = change.get("unresolved_refs") or []
-        if unresolved:
-            typer.echo(f"    unresolved: {', '.join(unresolved)}")
-    remote = engine.snapshot()["falkor"]
-    typer.echo(remote.get("detail") or "")
+    typer.echo(format_ingest_report(engine, summary))
+    if not engine.snapshot().get("graph_ready"):
+        raise typer.Exit(code=1)
 
 
 @app.command("change")
@@ -109,9 +118,10 @@ def review(
     head: Optional[str] = typer.Option(None, help="Git head ref"),
     files: Optional[str] = typer.Option(None, help="Comma-separated modified paths"),
 ) -> None:
-    """Review the scoped change (or scope first via --files / --base / --head)."""
+    """Decide one scoped change and print an explainable report."""
     engine = _loaded(target, base=base, head=head, files=_split_files(files))
     if not engine.changes:
+        typer.echo(banner())
         typer.echo("No change is scoped. Pass --files or --base/--head for a local git folder.")
         raise typer.Exit(code=1)
     selected = change_id or engine.changes[0]["id"]
@@ -124,13 +134,64 @@ def review(
             typer.echo(f"  {change['id']}")
         raise typer.Exit(code=1)
     record = payload["runs"][mode]
-    typer.echo(f"{record['change_id']}  {mode}  {record['state']}")
-    typer.echo(record["rationale"])
-    typer.echo(f"graph_revision={record.get('graph_revision')}  evidence={len(record.get('evidence') or [])}")
-    for claim in record["claims"]:
-        typer.echo(f"  [{claim['evidence_id']}] {claim['text']}")
-    others = ", ".join(f"{name}={item['state']}" for name, item in payload["runs"].items())
-    typer.echo(others)
+    typer.echo(
+        format_decision_report(
+            engine,
+            record,
+            action=record.get("action"),
+            modes=payload.get("runs"),
+        )
+    )
+
+
+@app.command()
+def report(
+    target: str,
+    files: Optional[str] = typer.Option(None, help="Comma-separated changed paths"),
+    base: Optional[str] = typer.Option(None, help="Git base ref"),
+    head: Optional[str] = typer.Option(None, help="Git head ref"),
+    mode: str = typer.Option("full", help="full | one_hop | graph_off"),
+) -> None:
+    """One-shot product command: publish graph → decide → explain → agent node pack."""
+    engine = _loaded(target, base=base, head=head, files=_split_files(files))
+    if not engine.changes:
+        snap = engine.snapshot()
+        typer.echo(format_ingest_report(engine, {
+            "origin": snap.get("origin"),
+            "nodes": snap.get("nodes"),
+            "edges": snap.get("edges"),
+            "services": snap.get("services") or [],
+            "scope_error": snap.get("scope_error"),
+            "suggested_files": snap.get("suggested_files") or [],
+        }))
+        typer.echo("\nPass --files path/to/changed.py (or --base/--head) to decide a change.")
+        raise typer.Exit(code=1)
+    selected = engine.changes[0]["id"]
+    payload = engine.review(selected, mode)
+    record = payload["runs"][mode]
+    typer.echo(
+        format_decision_report(
+            engine,
+            record,
+            action=record.get("action"),
+            modes=payload.get("runs"),
+        )
+    )
+    if record.get("state") in {"HOLD", "NEEDS_REVIEW", "INSUFFICIENT_EVIDENCE"}:
+        raise typer.Exit(code=2)
+
+
+@app.command()
+def status() -> None:
+    """Show product + FalkorDB readiness (no repository required)."""
+    from edl import falkor
+
+    engine = _engine()
+    typer.echo(format_status(engine))
+    remote = falkor.status()
+    typer.echo(f"  configured {remote.get('configured')}")
+    typer.echo(f"  host       {remote.get('host')}:{remote.get('port')}")
+    typer.echo(f"  browser    {remote.get('browser')}")
 
 
 @app.command()
@@ -201,6 +262,11 @@ def agent(
     mode: str = typer.Option("full", help="full | one_hop | graph_off"),
     act: bool = typer.Option(False, help="Execute gated local issue when allowed"),
     hops: int = typer.Option(3, help="Blast-radius hop limit"),
+    llm: bool = typer.Option(
+        False,
+        "--llm",
+        help="Let a model choose tools and narrate. Policy still sets the state.",
+    ),
 ) -> None:
     """Run the graph-backed change agent (tool selection → decide → gate)."""
     from edl.agent import format_agent_report, run_agent
@@ -208,16 +274,31 @@ def agent(
     if not scenario and not target:
         typer.echo("Pass a repository target, or --scenario <id> for an offline fixture.")
         raise typer.Exit(code=1)
-    result = run_agent(
-        target,
-        files=_split_files(files),
-        base=base,
-        head=head,
-        mode=mode,
-        execute_action=act,
-        hops=hops,
-        scenario=scenario,
-    )
+    if llm:
+        from edl.llm_agent import run_llm_agent
+
+        result = run_llm_agent(
+            target,
+            files=_split_files(files),
+            base=base,
+            head=head,
+            mode=mode,
+            execute_action=act,
+            hops=hops,
+            scenario=scenario,
+        )
+    else:
+        result = run_agent(
+            target,
+            files=_split_files(files),
+            base=base,
+            head=head,
+            mode=mode,
+            execute_action=act,
+            hops=hops,
+            scenario=scenario,
+        )
+    typer.echo(banner())
     typer.echo(format_agent_report(result))
     if not result.get("ok"):
         raise typer.Exit(code=1)
@@ -235,6 +316,40 @@ def mcp_serve(
     from edl.mcp_server import main as mcp_main
 
     mcp_main(check=check)
+
+
+@app.command("llm-check")
+def llm_check() -> None:
+    """Verify Gemini / OpenAI-compatible settings without running a full agent."""
+    from edl.llm_agent import chat_completion, llm_settings
+
+    settings = llm_settings()
+    if not settings.remote:
+        typer.echo(
+            "No remote LLM configured. Set SYZYGY_LLM_PROVIDER=gemini and "
+            "SYZYGY_LLM_API_KEY (AI Studio key), or SYZYGY_LLM_BASE_URL + key."
+        )
+        raise typer.Exit(code=1)
+    typer.echo(
+        f"provider={settings.provider or 'custom'}  model={settings.model}  "
+        f"base={settings.base_url}"
+    )
+    message = chat_completion(
+        [
+            {
+                "role": "user",
+                "content": "Reply with exactly one word: pong.",
+            }
+        ],
+        settings,
+        with_tools=False,
+    )
+    text = str(message.get("content") or "").strip()
+    typer.echo(f"assistant: {text[:200]}")
+    if "pong" not in text.lower() and not message.get("tool_calls"):
+        typer.echo("Warning: unexpected reply, but the endpoint answered.")
+    else:
+        typer.echo("LLM endpoint OK.")
 
 
 @app.command()
@@ -377,10 +492,13 @@ def graph_evidence(
 
 @app.command()
 def serve(port: int = 8000) -> None:
-    """Start the review UI. It stays empty until you analyze a repository."""
+    """Start the Syzygy UI. Analyze a repo, scope files, run the decision."""
     import uvicorn
 
-    typer.echo(f"Syzygy EDL at http://127.0.0.1:{port}")
+    typer.echo(banner())
+    typer.echo(f"UI          http://127.0.0.1:{port}")
+    typer.echo("Flow        Analyze repo → scope files → Run review")
+    typer.echo("Graph       Published to FalkorDB from .env on each Analyze")
     uvicorn.run("edl.api:app", host="127.0.0.1", port=port, reload=False)
 
 
@@ -400,5 +518,10 @@ def _loaded(
     return engine
 
 
-if __name__ == "__main__":
+def run() -> None:
+    """Console-script entry point (`syzygy` / `python -m edl`)."""
     app()
+
+
+if __name__ == "__main__":
+    run()

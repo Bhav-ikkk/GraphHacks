@@ -118,7 +118,9 @@ def run_agent(
         step("find_similar_incidents", {"service_id": service_id})
         step("get_deploy_state", {"service_id": service_id})
 
-    for symbol in symbols:
+    # Probe a bounded set of symbols for the transcript. decide_change still
+    # evaluates every scoped symbol through the review path.
+    for symbol in symbols[:4]:
         function_id = f"fn:{symbol}"
         step("centrality_rank", {"function_id": function_id})
         step("get_test_coverage", {"function_id": function_id})
@@ -176,6 +178,7 @@ def _explain(trace: list[dict], decision: dict, action: dict) -> dict:
     return {
         "summary": decision.get("rationale") or "No decision produced.",
         "triggered": decision.get("triggered") or [],
+        "missing": decision.get("missing") or [],
         "evidence_ids": decision.get("evidence_ids") or [],
         "blast_radius_paths": paths,
         "action_status": action.get("status"),
@@ -191,7 +194,8 @@ def _explain(trace: list[dict], decision: dict, action: dict) -> dict:
 def format_agent_report(result: dict) -> str:
     lines = [
         f"Agent episode  change={result.get('change_id')}  mode={result.get('mode')}",
-        f"backend={result.get('graph_backend')}  state={result.get('state')}",
+        f"backend={result.get('graph_backend')}  state={result.get('state')}"
+        + (f"  planner={result.get('planner')}" if result.get("planner") else ""),
         "",
         "Tool selection:",
     ]
@@ -201,6 +205,15 @@ def format_agent_report(result: dict) -> str:
     lines.append(f"Rationale: {result.get('rationale')}")
     explanation = result.get("explanation") or {}
     lines.append(f"Triggered: {', '.join(explanation.get('triggered') or []) or 'none'}")
+    missing = explanation.get("missing") or result.get("missing") or []
+    if missing:
+        details = []
+        for item in missing:
+            if isinstance(item, dict):
+                details.append(str(item.get("detail") or item.get("policy") or item))
+            else:
+                details.append(str(item))
+        lines.append("Missing evidence: " + "; ".join(details))
     lines.append("Blast-radius paths:")
     for path in explanation.get("blast_radius_paths") or []:
         trail = " → ".join(path.get("path") or []) or "(none)"
@@ -209,8 +222,16 @@ def format_agent_report(result: dict) -> str:
     lines.append(
         f"Action: {action.get('status')} - {action.get('reason')}"
     )
+    if result.get("narration"):
+        lines.append(f"Narration: {result.get('narration')}")
+    if result.get("narration_conflict"):
+        lines.append(
+            "Authority: the policy state above stands. Narration cannot change it."
+        )
     lines.append("")
     lines.append(explanation.get("how") or "")
+    if result.get("graph_backend") == "falkordb":
+        lines.append("Graph witness: FalkorDB backed every named tool read in this episode.")
     if result.get("error"):
         lines.append(f"Error: {result['error']}")
     return "\n".join(lines)

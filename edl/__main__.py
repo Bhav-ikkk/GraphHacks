@@ -1,4 +1,4 @@
-"""Syzygy CLI — ingest repos, publish FalkorDB graphs, decide changes, serve the UI."""
+"""Syzygy CLI - ingest repos, publish FalkorDB graphs, decide changes, serve the UI."""
 
 from __future__ import annotations
 
@@ -89,9 +89,9 @@ def ingest(
         typer.echo(banner())
         typer.echo(str(exc))
         raise typer.Exit(code=1)
-    typer.echo(format_ingest_report(engine, summary))
+    _echo(format_ingest_report(engine, summary))
     if not engine.snapshot().get("graph_ready"):
-        typer.echo("\nFalkorDB is not ready. Fix .env (host/password) then re-run ingest.")
+        _echo("\nFalkorDB is not ready. Fix .env (host/password) then re-run ingest.")
         raise typer.Exit(code=1)
 
 
@@ -140,7 +140,7 @@ def review(
             typer.echo(f"  {change['id']}")
         raise typer.Exit(code=1)
     record = payload["runs"][mode]
-    typer.echo(
+    _echo(
         format_decision_report(
             engine,
             record,
@@ -162,7 +162,7 @@ def report(
     engine = _loaded(target, base=base, head=head, files=_split_files(files))
     if not engine.changes:
         snap = engine.snapshot()
-        typer.echo(format_ingest_report(engine, {
+        _echo(format_ingest_report(engine, {
             "origin": snap.get("origin"),
             "nodes": snap.get("nodes"),
             "edges": snap.get("edges"),
@@ -170,12 +170,12 @@ def report(
             "scope_error": snap.get("scope_error"),
             "suggested_files": snap.get("suggested_files") or [],
         }))
-        typer.echo("\nPass --files path/to/changed.py (or --base/--head) to decide a change.")
+        _echo("\nPass --files path/to/changed.py (or --base/--head) to decide a change.")
         raise typer.Exit(code=1)
     selected = engine.changes[0]["id"]
     payload = engine.review(selected, mode)
     record = payload["runs"][mode]
-    typer.echo(
+    _echo(
         format_decision_report(
             engine,
             record,
@@ -193,7 +193,7 @@ def status() -> None:
     from edl import falkor
 
     engine = _engine()
-    typer.echo(format_status(engine))
+    _echo(format_status(engine))
     remote = falkor.status()
     typer.echo(f"  configured {remote.get('configured')}")
     typer.echo(f"  host       {remote.get('host')}:{remote.get('port')}")
@@ -522,6 +522,14 @@ def _loaded(
         typer.echo(str(exc))
         raise typer.Exit(code=1)
     return engine
+
+
+def _echo(text: str) -> None:
+    """Print for Windows consoles that reject non-ASCII."""
+    try:
+        typer.echo(text)
+    except UnicodeEncodeError:
+        typer.echo(text.encode("ascii", "replace").decode("ascii"))
 
 
 def run() -> None:

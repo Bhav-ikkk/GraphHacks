@@ -123,7 +123,7 @@ def format_decision_report(
     lines.append("")
     lines.append(line("Action gate"))
     lines.append(
-        f"  status     {action.get('status') or 'n/a'} — {action.get('reason') or ''}"
+        f"  status     {action.get('status') or 'n/a'} - {action.get('reason') or ''}"
     )
 
     lines.append("")
@@ -136,7 +136,7 @@ def format_decision_report(
         role = node.get("role") or ""
         lines.append(f"  {node_id:<32} {label:<12} {role}")
     if len(nodes) > 40:
-        lines.append(f"  … +{len(nodes) - 40} more")
+        lines.append(f"  ... +{len(nodes) - 40} more")
     if edges:
         lines.append(f"  edges used {len(edges)}")
 
@@ -190,8 +190,8 @@ def _next_steps(record: dict, action: dict, origin: dict) -> list[str]:
         steps.append("  2. After approval, re-run report and confirm state upgrades.")
     elif state == "INSUFFICIENT_EVIDENCE":
         steps.append("  1. Add CI runs, deploy, or incident data (Actions / syzygy.evidence.yaml).")
-        steps.append("  2. Fix unresolved file→symbol mapping if P6 fired.")
-        steps.append("  3. Re-run report once evidence exists — do not invent a PROCEED.")
+        steps.append("  2. Fix unresolved file->symbol mapping if P6 fired.")
+        steps.append("  3. Re-run report once evidence exists - do not invent a PROCEED.")
     elif state == "PROCEED_WITH_GUARDS":
         steps.append("  1. Keep the listed guards (tests / hop limits) before merge.")
         steps.append("  2. Optional: python -m edl agent \"{0}\" --files <files> --act".format(target))

@@ -13,6 +13,7 @@ OBSERVED = "2026-10-15T12:00:00Z"
 
 
 def all_scenarios() -> list[dict]:
+    """Eval-only fixtures for scoring. Never loaded by serve / ingest / UI."""
     return [
         missing_ci_must_abstain(),
         graph_necessary_incident_hold(),
@@ -244,10 +245,11 @@ def _change(
     ci: dict,
     designated_approval: bool = False,
     approver: str | None = None,
+    title: str | None = None,
 ) -> dict:
     return {
         "id": change_id,
-        "title": change_id,
+        "title": title or change_id,
         "symbols": symbols,
         "files": files,
         "description": f"Eval change {change_id}",
@@ -279,20 +281,21 @@ def _service(graph: MemoryGraph, name: str, *, tier: int | None) -> None:
     )
 
 
-def _function(graph: MemoryGraph, service: str, fname: str) -> None:
+def _function(graph: MemoryGraph, service: str, fname: str, *, kind: str | None = None) -> None:
     symbol = f"{service}.{fname}"
-    graph.add_node(
-        {
-            "id": f"fn:{symbol}",
-            "label": "Function",
-            "name": symbol,
-            "service": service,
-            "fname": fname,
-            "granularity": "function",
-            "source": "eval-fixture",
-            "evidence_type": "observed",
-        }
-    )
+    node = {
+        "id": f"fn:{symbol}",
+        "label": "Function",
+        "name": symbol,
+        "service": service,
+        "fname": fname,
+        "granularity": "function",
+        "source": "eval-fixture",
+        "evidence_type": "observed",
+    }
+    if kind:
+        node["kind"] = kind
+    graph.add_node(node)
     graph.add_edge(f"fn:{symbol}", "PART_OF", f"svc:{service}", evidence_type="observed")
 
 

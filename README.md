@@ -8,7 +8,7 @@ Engineering decision layer for one code change in a repository you choose.
 4. **Policy** returns one state: proceed, proceed with guards, needs review, hold, or insufficient evidence.
 5. A **gate** blocks unsafe side effects.
 
-A bare git tree does not contain CI runs, deploy health, or incidents. Those stay missing until you attach a real source. This repo ships an optional [`syzygy.evidence.yaml`](syzygy.evidence.yaml) so the hackathon demo can show a justified **HOLD** on **this** codebase (`edl` / `web`), not a fake payments service. Eval fixtures under `edl/eval/` never load into the live UI.
+A bare git tree does not contain CI runs, deploy health, or incidents. Those stay missing until a real source provides them (GitHub Actions via `GITHUB_TOKEN`, or an optional [`syzygy.evidence.yaml`](syzygy.evidence.yaml) you fill with observed facts). Eval fixtures under `edl/eval/` are for scoring only and never load into the live UI or `serve`.
 
 **Teammate onboarding:** open [`docs/teammate-guide.html`](docs/teammate-guide.html).
 
@@ -42,25 +42,41 @@ python -m edl status
 python -m edl ingest .
 python -m edl ingest https://github.com/owner/name
 
-# 2) Full product report: graph → decide → claims → agent node pack
+# 2) Full product report: graph → decide → claims → next steps
 python -m edl report . --files edl/agent.py
 python -m edl report C:\path\to\other-repo --files src/main.py
 python -m edl report https://github.com/owner/name --files path/file.py
 
-# 3) Agent (Gemini when .env has SYZYGY_LLM_*)
-python -m edl agent . --files edl/agent.py --llm
+# 3) Agent on a real change
+python -m edl agent . --files edl/agent.py
 
-# 4) UI
+# 4) Owner notify draft + GitHub PR comment
+python -m edl notify . --files edl/agent.py
+python -m edl pr-comment . --pr 42 --files edl/agent.py --dry-run
+# python -m edl pr-comment . --pr 42 --files edl/agent.py   # needs GITHUB_TOKEN
+
+# 5) UI
 python -m edl serve
-# → http://127.0.0.1:8000  Analyze → scope files → Run review
+# → http://127.0.0.1:8000
+# Analyze → scope files → Run review (or Run agent)
+# Compare Full graph / 1-hop / Graph off — click the mode chips after review
 ```
+
+### Evidence modes (what the three chips mean)
+
+| Mode | What it uses | Why it exists |
+| --- | --- | --- |
+| **Full graph** | Multi-hop dependents, owners, incidents, history | Real decision |
+| **1-hop only** | Direct neighbors only | Ablation — hides deep blast radius |
+| **Graph off** | Diff/CI text, no relationship walk | Proves *graph lift* when Full is stricter |
+
+Policy still decides. The LLM/agent may choose tools and narrate; it cannot upgrade HOLD / REVIEW / INSUFFICIENT.
 
 Exit codes for `report`: `0` proceed/guards, `2` hold/review/insufficient, `1` hard error.
 
-Offline graph-lift proof (fixture only, not the live product):
+Offline eval (fixture scoring only — not the live product):
 
 ```powershell
-python -m edl agent --scenario graph_necessary_incident_hold
 python -m edl eval
 ```
 

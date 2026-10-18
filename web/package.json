@@ -1,0 +1,15 @@
+{
+  "name": "syzygy-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bundle": "esbuild node_modules/@falkordb/canvas/dist/index.js --bundle --format=esm --outfile=vendor/falkordb-canvas.js --minify"
+  },
+  "dependencies": {
+    "@falkordb/canvas": "^0.3.3"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

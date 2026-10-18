@@ -158,6 +158,10 @@ def publish(graph: MemoryGraph, *, force: bool = False) -> dict[str, Any]:
 
 
 def _published(settings: FalkorSettings, remote, graph: MemoryGraph, *, via: str) -> dict[str, Any]:
+    from edl.progress import step as progress
+
+    nodes, edges = graph.counts()
+    progress(f"Writing graph via {via} ({nodes} nodes / {edges} edges)")
     selected = remote.select_graph(settings.graph)
     written = replace_graph(remote, settings.graph, graph)
     # replace_graph selects again; keep a fresh handle for reads
@@ -216,13 +220,14 @@ def replace_graph(remote, graph_name: str, graph: MemoryGraph) -> dict[str, int]
     if hasattr(selected, "ensure"):
         selected.ensure()
     node_count = 0
+    # Larger chunks = fewer round-trips to the remote Falkor host.
     for label, rows in node_groups(graph).items():
-        for chunk in _chunks(rows, 15):
+        for chunk in _chunks(rows, 40):
             selected.query(f"UNWIND {_literal_rows(chunk)} AS row CREATE (n:{label}) SET n = row")
             node_count += len(chunk)
     edge_count = 0
     for rel, rows in edge_groups(graph).items():
-        for chunk in _chunks(rows, 15):
+        for chunk in _chunks(rows, 40):
             selected.query(
                 f"UNWIND {_literal_rows(chunk)} AS row "
                 "MATCH (a {id: row.src}), (b {id: row.dst}) "

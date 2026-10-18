@@ -13,6 +13,7 @@ from edl.graph_reader import GraphUnavailable, MemoryReader, allow_memory_graph
 from edl.memory import MemoryGraph
 from edl.models import MODES
 from edl.policy import PolicyError, load_policy
+from edl.progress import step as progress
 from edl.review import public_record, review_change
 
 
@@ -56,6 +57,7 @@ class Engine:
         head: str | None = None,
         files: list[str] | None = None,
     ) -> dict:
+        progress(f"Scanning repository {target}")
         graph, summary = ingest.ingest(target)
         self.graph = graph
         self.changes = []
@@ -68,17 +70,41 @@ class Engine:
         self.issued = {}
         self.scope_note = "No change is scoped yet."
         self.scope_error = None
+        nodes, edges = self.graph.counts()
+        progress(f"Built local graph ({nodes} nodes, {edges} edges)")
         self.suggested_files = change_scope.suggest_scope_files(self.graph, origin=self.origin)
         try:
-            self._scope_change(base=base, head=head, files=files)
+            progress("Scoping change from files / git")
+            self._scope_change(base=base, head=head, files=files, publish=False)
             self.scope_error = None
         except ChangeError as exc:
-            self.scope_error = change_scope.scope_help_message(
-                self.graph, self.origin, reason=str(exc)
-            )
-            self.scope_note = self.scope_error
+            # GitHub URLs and empty working trees have no auto-diff. Pick the
+            # first observed path so Review / Agent / LLM work immediately.
+            if self.suggested_files and not files and not base and not head:
+                try:
+                    progress(f"Auto-scoping {self.suggested_files[0]}")
+                    self._scope_change(
+                        files=[self.suggested_files[0]], publish=False
+                    )
+                    self.scope_error = None
+                    self.scope_note = (
+                        f"Auto-scoped {self.suggested_files[0]} "
+                        "(no git diff / files were passed)."
+                    )
+                except ChangeError as again:
+                    self.scope_error = change_scope.scope_help_message(
+                        self.graph, self.origin, reason=str(again)
+                    )
+                    self.scope_note = self.scope_error
+            else:
+                self.scope_error = change_scope.scope_help_message(
+                    self.graph, self.origin, reason=str(exc)
+                )
+                self.scope_note = self.scope_error
         nodes, edges = self.graph.counts()
+        progress(f"Publishing to FalkorDB ({nodes} nodes, {edges} edges)")
         falkor.publish(self.graph)
+        progress("FalkorDB publish complete")
         return {
             "dataset": self.dataset,
             "origin": self.origin,
@@ -99,11 +125,12 @@ class Engine:
         head: str | None = None,
         files: list[str] | None = None,
         title: str | None = None,
+        republish: bool = True,
     ) -> dict:
         with self._lock:
-            scoped = self._scope_change(base=base, head=head, files=files, title=title)
-            falkor.publish(self.graph)
-            return scoped
+            return self._scope_change(
+                base=base, head=head, files=files, title=title, publish=republish
+            )
 
     def _scope_change(
         self,
@@ -112,6 +139,7 @@ class Engine:
         head: str | None = None,
         files: list[str] | None = None,
         title: str | None = None,
+        publish: bool = True,
     ) -> dict:
         if self.dataset != "repository" or self.origin is None:
             raise ChangeError("Analyze a repository before scoping a change.")
@@ -175,6 +203,12 @@ class Engine:
         self.issued = {}
         self.scope_error = None
         self.scope_note = change.get("note") or "Change scoped."
+        # Full replace is expensive over the network. Only republish when asked
+        # (e.g. CLI `change` after an earlier ingest). use_repository publishes once.
+        if publish:
+            if falkor.is_ready():
+                progress("Updating FalkorDB with scoped change node")
+            falkor.publish(self.graph)
         return {
             "change": _public_change(change),
             "scope_note": self.scope_note,
@@ -233,9 +267,17 @@ class Engine:
             return _fail_no_graph(change_id, mode, str(exc))
         change = self.change(change_id)
         runs = {}
-        for name in (mode, *[item for item in MODES if item != mode]):
+        # Active mode always reads FalkorDB (the witness). Sibling modes reuse the
+        # local staging graph — identical structure just published — so the
+        # full/one_hop/graph_off lift stays visible without 2x remote latency.
+        staging = MemoryReader(self.graph)
+        order = (mode, *[item for item in MODES if item != mode])
+        for name in order:
+            use = reader if name == mode else staging
+            via = backend if name == mode else f"{backend}+lift"
+            progress(f"Policy review mode={name} via {via}")
             record = review_change(
-                self.graph, change, policy, name, writeback=False, reader=reader
+                self.graph, change, policy, name, writeback=False, reader=use
             )
             record["graph_backend"] = backend
             runs[name] = self._remember(record, change)
@@ -316,6 +358,60 @@ class Engine:
             f"{detail}. Set FALKORDB_HOST/PASSWORD and publish a graph before review."
         )
 
+    def graph_preview(self) -> dict:
+        """Compact service/owner map for the UI canvas before a decision runs."""
+        seen: set[str] = set()
+        nodes: list[dict] = []
+        edges: list[dict] = []
+
+        def add_node(node: dict | None, role: str) -> None:
+            if not node or node["id"] in seen:
+                return
+            if node.get("name") == "__repo__":
+                return
+            seen.add(node["id"])
+            nodes.append(
+                {
+                    "id": node["id"],
+                    "label": node.get("name") or node["id"],
+                    "role": role,
+                }
+            )
+
+        for service in self.graph.by_label("Service"):
+            add_node(service, "dependency")
+            for edge in self.graph.edges_from(service["id"], "DEPENDS_ON"):
+                other = self.graph.node(edge["dst"])
+                add_node(other, "consumer")
+                edges.append(
+                    {
+                        "source": edge["src"],
+                        "target": edge["dst"],
+                        "label": "DEPENDS_ON",
+                    }
+                )
+            for edge in self.graph.edges_to(service["id"], "OWNS"):
+                team = self.graph.node(edge["src"])
+                add_node(team, "owner")
+                edges.append(
+                    {
+                        "source": edge["src"],
+                        "target": edge["dst"],
+                        "label": "OWNS",
+                    }
+                )
+            for edge in self.graph.edges_to(service["id"], "AFFECTED"):
+                incident = self.graph.node(edge["src"])
+                add_node(incident, "incident")
+                edges.append(
+                    {
+                        "source": edge["src"],
+                        "target": edge["dst"],
+                        "label": "AFFECTED",
+                    }
+                )
+        return {"nodes": nodes, "edges": edges, "kind": "preview"}
+
     def snapshot(self) -> dict:
         nodes, edges = self.graph.counts()
         remote = falkor.status()
@@ -334,6 +430,7 @@ class Engine:
             "policy_version": self.policy.get("version"),
             "changes": [_public_change(change) for change in self.changes],
             "services": self.services(),
+            "graph_preview": self.graph_preview() if self.dataset == "repository" else None,
             "modes": list(MODES),
         }
 

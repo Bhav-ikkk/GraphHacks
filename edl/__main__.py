@@ -21,6 +21,7 @@ from edl.explore import (
     shortest_path,
 )
 from edl.ingest import IngestError
+from edl.progress import track
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY = ROOT / "policies" / "policies.yaml"
@@ -78,17 +79,18 @@ def ingest(
 ) -> None:
     """Scan a repo, publish its graph to FalkorDB, optionally scope a change."""
     engine = _engine()
-    try:
-        summary = engine.use_repository(
-            target,
-            base=base,
-            head=head,
-            files=_split_files(files),
-        )
-    except IngestError as exc:
-        typer.echo(banner())
-        typer.echo(str(exc))
-        raise typer.Exit(code=1)
+    with track(f"ingest {target}"):
+        try:
+            summary = engine.use_repository(
+                target,
+                base=base,
+                head=head,
+                files=_split_files(files),
+            )
+        except IngestError as exc:
+            typer.echo(banner())
+            typer.echo(str(exc))
+            raise typer.Exit(code=1)
     _echo(format_ingest_report(engine, summary))
     if not engine.snapshot().get("graph_ready"):
         _echo("\nFalkorDB is not ready. Fix .env (host/password) then re-run ingest.")
@@ -159,21 +161,22 @@ def report(
     mode: str = typer.Option("full", help="full | one_hop | graph_off"),
 ) -> None:
     """One-shot product command: publish graph → decide → explain → agent node pack."""
-    engine = _loaded(target, base=base, head=head, files=_split_files(files))
-    if not engine.changes:
-        snap = engine.snapshot()
-        _echo(format_ingest_report(engine, {
-            "origin": snap.get("origin"),
-            "nodes": snap.get("nodes"),
-            "edges": snap.get("edges"),
-            "services": snap.get("services") or [],
-            "scope_error": snap.get("scope_error"),
-            "suggested_files": snap.get("suggested_files") or [],
-        }))
-        _echo("\nPass --files path/to/changed.py (or --base/--head) to decide a change.")
-        raise typer.Exit(code=1)
-    selected = engine.changes[0]["id"]
-    payload = engine.review(selected, mode)
+    with track(f"report {target}"):
+        engine = _loaded(target, base=base, head=head, files=_split_files(files))
+        if not engine.changes:
+            snap = engine.snapshot()
+            _echo(format_ingest_report(engine, {
+                "origin": snap.get("origin"),
+                "nodes": snap.get("nodes"),
+                "edges": snap.get("edges"),
+                "services": snap.get("services") or [],
+                "scope_error": snap.get("scope_error"),
+                "suggested_files": snap.get("suggested_files") or [],
+            }))
+            _echo("\nPass --files path/to/changed.py (or --base/--head) to decide a change.")
+            raise typer.Exit(code=1)
+        selected = engine.changes[0]["id"]
+        payload = engine.review(selected, mode)
     record = payload["runs"][mode]
     _echo(
         format_decision_report(
@@ -280,30 +283,32 @@ def agent(
     if not scenario and not target:
         typer.echo("Pass a repository target, or --scenario <id> for an offline fixture.")
         raise typer.Exit(code=1)
-    if llm:
-        from edl.llm_agent import run_llm_agent
+    label = f"agent {target or scenario}" + (" --llm" if llm else "")
+    with track(label):
+        if llm:
+            from edl.llm_agent import run_llm_agent
 
-        result = run_llm_agent(
-            target,
-            files=_split_files(files),
-            base=base,
-            head=head,
-            mode=mode,
-            execute_action=act,
-            hops=hops,
-            scenario=scenario,
-        )
-    else:
-        result = run_agent(
-            target,
-            files=_split_files(files),
-            base=base,
-            head=head,
-            mode=mode,
-            execute_action=act,
-            hops=hops,
-            scenario=scenario,
-        )
+            result = run_llm_agent(
+                target,
+                files=_split_files(files),
+                base=base,
+                head=head,
+                mode=mode,
+                execute_action=act,
+                hops=hops,
+                scenario=scenario,
+            )
+        else:
+            result = run_agent(
+                target,
+                files=_split_files(files),
+                base=base,
+                head=head,
+                mode=mode,
+                execute_action=act,
+                hops=hops,
+                scenario=scenario,
+            )
     typer.echo(banner())
     typer.echo(format_agent_report(result))
     if not result.get("ok"):
@@ -496,6 +501,93 @@ def graph_evidence(
     typer.echo(format_evidence(payload["runs"][mode]))
 
 
+@app.command("notify")
+def notify_cmd(
+    target: str,
+    files: Optional[str] = typer.Option(None, help="Comma-separated changed paths"),
+    base: Optional[str] = typer.Option(None),
+    head: Optional[str] = typer.Option(None),
+    mode: str = typer.Option("full"),
+    send: bool = typer.Option(
+        False,
+        "--send",
+        help="Attempt SMTP send when SYZYGY_SMTP_* is set; otherwise write a draft only.",
+    ),
+) -> None:
+    """Draft (or send) an owner notification from a real-repo decision."""
+    from edl.notify import notify_owners
+
+    engine = _loaded(target, base=base, head=head, files=_split_files(files))
+    if not engine.changes:
+        _echo("No change scoped. Pass --files or --base/--head.")
+        raise typer.Exit(code=1)
+    payload = engine.review(engine.changes[0]["id"], mode)
+    record = payload["runs"][mode]
+    result = notify_owners(engine, record, send=send)
+    _echo(banner())
+    _echo(f"status  {result.get('status')}")
+    _echo(f"to      {', '.join(result.get('to') or []) or '(no owner emails found)'}")
+    _echo(f"subject {result.get('subject')}")
+    if result.get("draft_path"):
+        _echo(f"draft   {result['draft_path']}")
+    if result.get("detail"):
+        _echo(result["detail"])
+
+
+@app.command("pr-comment")
+def pr_comment_cmd(
+    target: str,
+    pr: int = typer.Option(..., "--pr", help="Pull request number"),
+    files: Optional[str] = typer.Option(None, help="Comma-separated changed paths"),
+    base: Optional[str] = typer.Option(None),
+    head: Optional[str] = typer.Option(None),
+    mode: str = typer.Option("full"),
+    check: bool = typer.Option(
+        False,
+        "--check",
+        help="Also create a GitHub Check Run (requires checks:write).",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Print the comment body without calling GitHub.",
+    ),
+) -> None:
+    """Post the decision as a GitHub PR comment (real repo + GITHUB_TOKEN)."""
+    from edl.github_pr import post_decision_to_pr
+
+    engine = _loaded(target, base=base, head=head, files=_split_files(files))
+    if not engine.changes:
+        _echo("No change scoped. Pass --files matching the PR diff.")
+        raise typer.Exit(code=1)
+    payload = engine.review(engine.changes[0]["id"], mode)
+    record = payload["runs"][mode]
+    try:
+        result = post_decision_to_pr(
+            engine,
+            record,
+            pr_number=pr,
+            create_check=check,
+            dry_run=dry_run,
+        )
+    except RuntimeError as exc:
+        _echo(str(exc))
+        raise typer.Exit(code=1)
+    _echo(banner())
+    _echo(f"status   {result.get('status')}")
+    if result.get("comment_url"):
+        _echo(f"comment  {result['comment_url']}")
+    if result.get("check_url"):
+        _echo(f"check    {result['check_url']}")
+    if result.get("detail"):
+        _echo(result["detail"])
+    if result.get("body_preview"):
+        _echo("")
+        _echo(result["body_preview"][:2000])
+    if result.get("status") not in {"posted", "dry_run", "ok"}:
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def serve(port: int = 8000) -> None:
     """Start the Syzygy UI. Analyze a repo, scope files, run the decision."""
@@ -503,7 +595,7 @@ def serve(port: int = 8000) -> None:
 
     typer.echo(banner())
     typer.echo(f"UI          http://127.0.0.1:{port}")
-    typer.echo("Flow        Analyze repo → scope files → Run review")
+    typer.echo("Flow        Analyze repo -> scope files -> Run review")
     typer.echo("Graph       Published to FalkorDB from .env on each Analyze")
     uvicorn.run("edl.api:app", host="127.0.0.1", port=port, reload=False)
 
@@ -519,6 +611,7 @@ def _loaded(
     try:
         engine.use_repository(target, base=base, head=head, files=files)
     except IngestError as exc:
+        typer.echo(banner())
         typer.echo(str(exc))
         raise typer.Exit(code=1)
     return engine

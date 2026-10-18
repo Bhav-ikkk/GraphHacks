@@ -15,9 +15,10 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from edl.agent import LOG, POLICY, _explain, load_scenario
+from edl.agent import LOG, POLICY, MAX_SYMBOL_PROBES, _explain, load_scenario
 from edl.config import load_env
 from edl.engine import Engine
+from edl.progress import step as progress
 from edl.tools import ToolContext, call_tool, list_tools
 
 STATES = (
@@ -301,6 +302,7 @@ def run_llm_agent(
 
     def step(call: ToolCall) -> dict:
         arguments = _lock_arguments(call, task, trace, change_id)
+        progress(f"Agent tool: {call.name}")
         payload = call_tool(ctx, call.name, arguments)
         trace.append({"tool": call.name, "arguments": arguments, "response": payload})
         active_planner.observe(call, payload)
@@ -421,11 +423,10 @@ def _investigation_calls(trace: list[dict], task: dict) -> list[ToolCall]:
         calls.append(ToolCall("get_deploy_state", {"service_id": service_id}, f"deploy:{service_id}"))
     # Cap per-function probes so large files cannot exhaust the step budget
     # before decide_change. Policy still sees every scoped symbol via decide.
-    for symbol in symbols[:4]:
+    for symbol in symbols[:MAX_SYMBOL_PROBES]:
         function_id = f"fn:{symbol}"
         calls.append(ToolCall("centrality_rank", {"function_id": function_id}, f"rank:{function_id}"))
         calls.append(ToolCall("get_test_coverage", {"function_id": function_id}, f"tests:{function_id}"))
-        calls.append(ToolCall("find_similar_incidents", {"function_id": function_id}, f"fixes:{function_id}"))
     if change_id:
         calls.append(
             ToolCall(

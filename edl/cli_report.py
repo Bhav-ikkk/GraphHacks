@@ -148,7 +148,7 @@ def format_decision_report(
 
     lines.append("")
     lines.append(line("What you should do"))
-    lines.extend(_next_steps(record, action, origin))
+    lines.extend(next_steps_lines(record, action, origin))
     lines.append("")
     lines.append(f"{PRODUCT_LONG} v{VERSION} - policy is the judge; FalkorDB is the witness.")
     return "\n".join(lines)
@@ -178,33 +178,33 @@ def agent_node_pack(record: dict, snap: dict) -> list[str]:
     return rows
 
 
-def _next_steps(record: dict, action: dict, origin: dict) -> list[str]:
+def next_steps_lines(record: dict, action: dict, origin: dict) -> list[str]:
+    """Actionable next steps for CLI, UI, notify, and PR comments."""
     state = str(record.get("state") or "")
     target = origin.get("value") or "<repo>"
     steps = []
     if state == "HOLD":
         steps.append("  1. Do not merge. Resolve the open incident / failing health cited above.")
-        steps.append("  2. Re-run: python -m edl report \"{0}\" --files <same files>".format(target))
+        steps.append(f'  2. Re-run: python -m edl report "{target}" --files <same files>')
     elif state == "NEEDS_REVIEW":
         steps.append("  1. Route to the owners listed in claims / CODEOWNERS.")
         steps.append("  2. After approval, re-run report and confirm state upgrades.")
+        steps.append(f'  3. Optional: python -m edl notify "{target}" --files <files>')
     elif state == "INSUFFICIENT_EVIDENCE":
-        steps.append("  1. Add CI runs, deploy, or incident data (Actions / syzygy.evidence.yaml).")
+        steps.append("  1. Add real CI runs (GITHUB_TOKEN + Actions) or deploy/incident sources.")
         steps.append("  2. Fix unresolved file->symbol mapping if P6 fired.")
         steps.append("  3. Re-run report once evidence exists - do not invent a PROCEED.")
     elif state == "PROCEED_WITH_GUARDS":
         steps.append("  1. Keep the listed guards (tests / hop limits) before merge.")
-        steps.append("  2. Optional: python -m edl agent \"{0}\" --files <files> --act".format(target))
+        steps.append(f'  2. Optional: python -m edl agent "{target}" --files <files> --act')
     elif state == "PROCEED":
         steps.append("  1. Safe to proceed under current policy + graph evidence.")
         if action.get("status") == "ready":
             steps.append("  2. Optional gated issue: add --act on the agent command.")
     else:
         steps.append("  1. Re-run with --files scoped to the paths you changed.")
-    steps.append(
-        "  Agent: python -m edl agent \"{0}\" --files <files> --llm".format(target)
-    )
-    steps.append("  UI:    python -m edl serve   → http://127.0.0.1:8000")
+    steps.append(f'  Agent: python -m edl agent "{target}" --files <files>')
+    steps.append("  UI:    python -m edl serve   -> http://127.0.0.1:8000")
     return steps
 
 

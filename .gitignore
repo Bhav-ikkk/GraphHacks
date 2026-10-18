@@ -7,3 +7,5 @@ results/
 *.pyc
 .DS_Store
 .env
+web/node_modules/
+web/package-lock.json

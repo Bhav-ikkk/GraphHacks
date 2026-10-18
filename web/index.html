@@ -3,363 +3,215 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Syzygy EDL — Engineering Decision Layer</title>
+  <title>Syzygy EDL · Graph-backed decisions</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css?v=9" />
-  <script type="module">
-    import 'https://esm.sh/@falkordb/canvas@0.0.29';
-    window.FALKOR_CANVAS_READY = Boolean(customElements.get('falkordb-canvas'));
-    window.dispatchEvent(new CustomEvent('falkor-canvas-loaded'));
-  </script>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css?v=35" />
 </head>
 <body>
-  <div class="app-shell">
-    <!-- Row 1: Top Frosted Glass Navigation Bar (2-Tier) -->
-    <header class="top-bar">
-      <!-- Tier 1: Brand + Tabs + Status -->
-      <div class="top-bar-row top-bar-tier1">
-        <!-- Left: macOS Window Controls & Branding -->
-        <div class="brand-cluster">
-          <div class="traffic-lights" aria-hidden="true">
-            <span class="traffic-light red"></span>
-            <span class="traffic-light yellow"></span>
-            <span class="traffic-light green"></span>
-          </div>
-          <div class="brand-logo-wrap">
-            <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(45 12 12)"></ellipse>
-              <ellipse cx="12" cy="12" rx="10" ry="4" transform="rotate(-45 12 12)"></ellipse>
-              <circle cx="12" cy="12" r="2.5" fill="currentColor"></circle>
-            </svg>
-            <span class="brand-title">Syzygy</span>
-            <span class="brand-badge">EDL</span>
+  <div id="toast" class="toast" hidden>
+    <strong id="toast-label">Working</strong>
+    <span id="toast-detail">Starting…</span>
+    <div class="toast-bar"><i></i></div>
+  </div>
+
+  <div class="app">
+    <aside class="rail">
+      <header class="rail-brand">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <div>
+            <div class="brand-row">
+              <span class="mark">Syzygy</span>
+              <span class="product">EDL</span>
+            </div>
+            <p class="tagline">Engineering Decision Layer on FalkorDB</p>
           </div>
         </div>
-
-        <!-- Center: Navigation Tabs -->
-        <div class="subnav-tabs" role="tablist">
-          <button type="button" class="subnav-tab" role="tab" id="tab-nav-dashboard">Dashboard</button>
-          <button type="button" class="subnav-tab" role="tab" id="tab-nav-explore">Explore &amp; Graph</button>
-          <button type="button" class="subnav-tab active" role="tab" id="tab-nav-policies">Policies &amp; Rules</button>
+        <div class="chips">
+          <span class="chip" id="backend">Graph offline</span>
+          <span class="chip" id="llm-chip">LLM off</span>
         </div>
+      </header>
 
-        <!-- Right: FalkorDB Status + GitHub -->
-        <div class="right-cluster">
-          <!-- FalkorDB Connection Pill -->
-          <div class="falkordb-pill" id="backend" title="Live FalkorDB connection status">
-            <span class="status-dot"></span>
-            <span>FalkorDB</span>
-          </div>
-
-          <!-- Connect GitHub Button (toggles drawer) -->
-          <button type="button" class="btn-github" id="connect-github-btn" title="Toggle GitHub repository configuration">
-            <svg viewBox="0 0 24 24">
-              <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
-            </svg>
-            <span>Connect GitHub</span>
-          </button>
-        </div>
-      </div>
-
-      <!-- Tier 2: Repository Pill + Change/Mode Selects + Run Button -->
-      <div class="top-bar-row top-bar-tier2">
-        <!-- Repository Trigger Pill (toggles drawer) -->
-        <button type="button" class="repo-pill-btn" id="repo-pill-btn" title="Click to configure repository and git scope">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-          </svg>
-          <span id="repo-pill-name">No repository yet — Analyze a GitHub URL or folder</span>
-          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-            <polyline points="6 9 12 15 18 9"></polyline>
-          </svg>
+      <nav class="steps" aria-label="Workflow">
+        <button type="button" class="step active" data-step="1">
+          <span class="step-num">1</span>
+          <span class="step-label">Analyze</span>
         </button>
+        <button type="button" class="step" data-step="2">
+          <span class="step-num">2</span>
+          <span class="step-label">Scope</span>
+        </button>
+        <button type="button" class="step" data-step="3">
+          <span class="step-num">3</span>
+          <span class="step-label">Decide</span>
+        </button>
+      </nav>
 
-        <!-- Scoped Change Dropdown -->
-        <div class="control-select-wrap" title="Scoped change from diff or file list">
-          <select id="change" aria-label="Scoped change"></select>
-          <svg class="select-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-            <polyline points="6 9 12 15 18 9"></polyline>
-          </svg>
+      <section class="block" id="block-analyze">
+        <h2>Repository</h2>
+        <form id="ingest-form" class="stack">
+          <input id="target" placeholder="GitHub URL or local folder" autocomplete="off" />
+          <button type="submit" id="analyze-btn" class="btn primary">
+            <span>Analyze &amp; publish</span>
+          </button>
+        </form>
+        <p class="hint" id="origin-note"></p>
+        <p class="error" id="ingest-error" hidden></p>
+      </section>
+
+      <section class="block" id="block-scope">
+        <h2>Change scope</h2>
+        <p class="hint" id="change-help">Analyze a repo first</p>
+        <div id="suggestions" class="file-list" hidden>
+          <div id="suggestion-list"></div>
         </div>
+        <details class="advanced">
+          <summary>Custom paths / refs</summary>
+          <input id="files" placeholder="path/to/file.py" autocomplete="off" />
+          <div class="twin">
+            <input id="base" placeholder="base" autocomplete="off" />
+            <input id="head" placeholder="head" autocomplete="off" />
+          </div>
+          <button type="button" id="rescope" class="btn ghost" disabled>Rescope</button>
+        </details>
+        <p class="hint" id="scope-note"></p>
+        <p class="error" id="scope-error" hidden></p>
+        <select id="change" class="sr-only" aria-label="Active change"></select>
+      </section>
 
-        <!-- Evidence Mode Dropdown -->
-        <div class="control-select-wrap" title="Evidence mode for review">
-          <select id="mode" aria-label="Evidence mode">
+      <section class="block grow" id="block-decide">
+        <h2>Decision path</h2>
+        <div class="seg" role="tablist">
+          <button type="button" class="seg-btn active" data-path="review">Review</button>
+          <button type="button" class="seg-btn" data-path="agent">Agent</button>
+          <button type="button" class="seg-btn" data-path="llm">+ LLM</button>
+        </div>
+        <p class="hint" id="path-help">Policy sets the state. Agents only pick named tools.</p>
+        <button type="button" id="run" class="btn primary" disabled>Run review</button>
+        <p class="error" id="review-error" hidden></p>
+
+        <div id="decision" class="decision" hidden>
+          <div id="lift" class="lift" hidden>
+            <span class="lift-kicker">Graph lift</span>
+            <p id="lift-text"></p>
+          </div>
+          <p class="kicker" id="kicker"></p>
+          <h3 id="state">—</h3>
+          <p class="rationale" id="rationale"></p>
+          <ul class="policies" id="policies"></ul>
+          <h4>Impact</h4>
+          <ul id="impact-list" class="mini"></ul>
+          <h4>Next</h4>
+          <ul id="next-steps" class="mini"></ul>
+          <div id="narration-box" hidden>
+            <h4>Narration</h4>
+            <p id="narration" class="narration"></p>
+          </div>
+          <div class="action-row">
+            <button type="button" id="act" class="btn ghost">Issue</button>
+            <button type="button" id="notify" class="btn ghost">Notify</button>
+          </div>
+          <details class="advanced soon">
+            <summary>GitHub PR <em>next</em></summary>
+            <p class="hint">PR comment + check gate is the remaining integration.</p>
+            <div class="twin">
+              <input id="pr-number" type="number" min="1" placeholder="PR #" disabled />
+              <button type="button" id="pr-comment" class="btn ghost" disabled>Post</button>
+            </div>
+          </details>
+          <p id="action-reason" class="hint"></p>
+          <p id="action-result" class="mono"></p>
+        </div>
+      </section>
+
+      <footer class="rail-foot">
+        <span>MCP</span>
+        <code>python -m edl mcp</code>
+      </footer>
+    </aside>
+
+    <section class="stage">
+      <header class="stage-bar">
+        <div class="stage-title">
+          <p class="eyebrow">FalkorDB canvas</p>
+          <h1 id="graph-title">Repository graph</h1>
+          <p id="graph-caption">Analyze a repo to publish into FalkorDB and explore the live service map.</p>
+        </div>
+        <div class="stage-tools">
+          <div class="mode-row" id="compare"></div>
+          <select id="mode" class="mode-select" aria-label="Evidence mode">
             <option value="full">Full graph</option>
             <option value="one_hop">1-hop only</option>
             <option value="graph_off">Graph off</option>
           </select>
-          <svg class="select-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-            <polyline points="6 9 12 15 18 9"></polyline>
-          </svg>
+        </div>
+      </header>
+
+      <div class="canvas-shell">
+        <div class="canvas-controls" role="toolbar" aria-label="Graph controls">
+          <button type="button" id="g-play" class="icon-btn" title="Pause / play layout" aria-pressed="true">❚❚</button>
+          <button type="button" id="g-fit" class="icon-btn" title="Fit to screen">⊡</button>
+          <button type="button" id="g-zoom-in" class="icon-btn" title="Zoom in">+</button>
+          <button type="button" id="g-zoom-out" class="icon-btn" title="Zoom out">−</button>
+          <span class="ctrl-sep"></span>
+          <button type="button" class="layout-btn active" data-layout="force" title="Force layout">Force</button>
+          <button type="button" class="layout-btn" data-layout="radial" title="Radial layout">Radial</button>
+          <button type="button" class="layout-btn" data-layout="tree" title="Tree layout">Tree</button>
         </div>
 
-        <!-- Run Review Apple Blue Button -->
-        <button type="button" id="run" class="btn-run" title="Run risk review on scoped change">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
-            <polygon points="5 3 19 12 5 21 5 3"></polygon>
-          </svg>
-          <span>Run review</span>
-        </button>
-      </div>
-    </header>
-
-    <!-- Row 2: Slide-Down Repository & Git Scope Configuration Drawer -->
-    <div class="drawer-overlay" id="repo-drawer" hidden>
-      <div class="drawer-header">
-        <div class="drawer-status-badge">
-          <span class="status-dot"></span>
-          <span>GitHub App Connected &bull; Auto-review PRs enabled</span>
+        <div id="graph" class="canvas">
+          <falkordb-canvas id="falkor-canvas" style="width:100%;height:100%;display:block;"></falkordb-canvas>
+          <div id="graph-empty" class="empty">
+            <div class="empty-orb" aria-hidden="true"></div>
+            <strong>No graph yet</strong>
+            <p>Analyze a repository to publish into FalkorDB.<br/>Then run Review / Agent to see blast radius by mode.</p>
+          </div>
         </div>
-        <button type="button" class="drawer-close-btn" id="drawer-close-btn" aria-label="Close configuration drawer">&times;</button>
-      </div>
 
-      <div class="drawer-grid">
-        <!-- Ingestion & Scope Form -->
-        <form id="ingest-form">
-          <div class="drawer-field">
-            <label for="target">GitHub URL or a folder on this machine</label>
-            <div class="input-row">
-              <input id="target" name="target" placeholder="https://github.com/owner/name or /local/path" autocomplete="off" />
-              <button type="submit" class="btn-secondary">Analyze</button>
-            </div>
-            <p class="hint-text" id="origin-note"></p>
-            <p class="error-banner" id="ingest-error" hidden></p>
-          </div>
-
-          <div class="drawer-field">
-            <label for="files">Changed files (comma-separated)</label>
-            <input id="files" name="files" placeholder="edl/agent.py, edl/tools.py" autocomplete="off" />
-            <p class="hint-text" id="scope-note"></p>
-            <p class="error-banner" id="scope-error" hidden></p>
-          </div>
-
-          <div class="drawer-field">
-            <div class="input-row">
-              <div style="flex: 1;">
-                <label for="base">Git base (HEAD~1)</label>
-                <input id="base" name="base" placeholder="HEAD~1" autocomplete="off" />
-              </div>
-              <div style="flex: 1;">
-                <label for="head">Git head (HEAD)</label>
-                <input id="head" name="head" placeholder="HEAD" autocomplete="off" />
-              </div>
-            </div>
-          </div>
-
-          <div class="drawer-field">
-            <button type="button" id="rescope" class="btn-secondary" style="width: 100%;">Rescope from fields above</button>
-          </div>
-          <p id="change-help" class="hint-text">One scoped change from the diff or file list — not every function in the tree.</p>
-        </form>
-
-        <!-- Discovered Repository Services & Owners -->
-        <div id="service-editor" class="services-box" hidden>
-          <h3>What the repository contained</h3>
-          <p class="hint-text">Owners appear only when CODEOWNERS names them. There is no guessed tier and no sample incident.</p>
-          <div id="services" class="services-list"></div>
-        </div>
-      </div>
-      <p class="error-banner" id="review-error" hidden></p>
-    </div>
-
-    <!-- Row 3: Apple 3-Pane Workspace Grid -->
-    <main id="results" class="workspace-grid">
-      <!-- Left Pane: Decision Gate Verdict & Scoped Claims -->
-      <aside class="pane-column left-pane">
-        <!-- Card A: Decision Gate Verdict Card -->
-        <article class="sheet apple-card verdict-card" id="sheet">
-          <div class="card-header-bar">
-            <span class="card-title">Decision Gate Verdict</span>
-            <span class="card-subtitle">Track 1 Policy</span>
-          </div>
-
-          <p class="kicker kicker-text" id="kicker">CHANGE:FILES &bull; FULL GRAPH &bull; POLICY &bull; FALKORDB</p>
-
-          <!-- Dynamic Status Hero Badge -->
-          <h1 id="state" class="verdict-hero-badge state-INSUFFICIENT_EVIDENCE">INSUFFICIENT EVIDENCE</h1>
-
-
-          <p class="rationale rationale-text" id="rationale">Evaluating decision evidence across repository graph...</p>
-
-          <!-- Policy & Gate Pills -->
-          <ul class="policies policies-pills-wrap" id="policies"></ul>
-
-          <!-- Action Section -->
-          <div class="action-box">
-            <p id="action-reason" class="action-reason-text"></p>
-            <button type="button" id="act" class="btn-action-issue">Create issue</button>
-            <p id="action-result" class="action-result action-result-text"></p>
-          </div>
-        </article>
-
-        <!-- Card B: Scoped Files & Claims Card -->
-        <article class="apple-card scoped-claims-card">
-          <div class="card-header-bar">
-            <span class="card-title">Scoped Files &amp; Claims</span>
-          </div>
-
-          <!-- Scoped File Chips -->
-          <div id="suggestions" class="suggestions" hidden>
-            <p class="hint-text" style="margin-bottom: 6px;">Click a path to scope that change:</p>
-            <div id="suggestion-list" class="suggestion-list file-chips-container"></div>
-          </div>
-
-          <!-- Active Claims List -->
-          <h3 class="claims-section-title">Claims</h3>
-          <ul id="claims" class="claims claims-list"></ul>
-
-          <!-- Missing or Stale List -->
-          <h3 class="claims-section-title" style="margin-top: 14px;">Missing or Stale</h3>
-          <ul id="missing" class="claims claims-list"></ul>
-        </article>
-      </aside>
-
-      <!-- Center Pane: 3-Way Mode Comparison & Knowledge Graph Canvas -->
-      <section class="center-column">
-        <!-- 3-Way Mode Ablation Comparison Bar -->
-        <div class="compare-segmented-bar" id="compare"></div>
-
-        <!-- Evidence Path Knowledge Graph Canvas Card -->
-        <article class="graph-canvas-card">
-          <header class="graph-card-header">
-            <div>
-              <h2 class="card-title" style="font-size: 15px;">Knowledge Graph</h2>
-              <p class="card-subtitle">Only the nodes this decision used.</p>
-            </div>
-            <div class="graph-header-controls">
-              <!-- FalkorDB Signature Layout Switcher -->
-              <div class="falkor-layout-picker" role="tablist" aria-label="FalkorDB Layout Modes">
-                <button type="button" class="layout-btn active" id="layout-tree" data-mode="tree" title="Left-to-Right Dependency Hierarchy">Tree (LR)</button>
-                <button type="button" class="layout-btn" id="layout-radial" data-mode="radial" title="Concentric Blast Radius Rings">Radial</button>
-                <button type="button" class="layout-btn" id="layout-force" data-mode="force" title="Physics Directed Simulation">Force</button>
-              </div>
-
-              <!-- Canvas Zoom Controls -->
-              <div class="zoom-controls">
-                <button type="button" class="btn-zoom" id="btn-zoom-in" title="Zoom in">+</button>
-                <button type="button" class="btn-zoom" id="btn-zoom-out" title="Zoom out">&minus;</button>
-                <button type="button" class="btn-zoom reset" id="btn-zoom-reset" title="Reset view">Reset</button>
-              </div>
-            </div>
+        <aside id="inspector" class="inspector" hidden>
+          <header>
+            <span class="insp-kicker">Selected</span>
+            <button type="button" id="insp-close" class="icon-btn tiny" title="Close">×</button>
           </header>
+          <h3 id="insp-title">—</h3>
+          <dl id="insp-meta" class="insp-meta"></dl>
+        </aside>
 
-          <!-- FalkorDB Schema & Subgraph Telemetry Strip -->
-          <div class="falkor-telemetry-strip" id="falkor-schema-strip">
-            <span class="falkor-engine-badge" id="falkor-engine-badge">⚡ @falkordb/canvas</span>
-            <span class="schema-divider"></span>
-            <div class="schema-pills" id="schema-pills">
-              <span class="schema-pill label-pill">:Service (1)</span>
-              <span class="schema-pill label-pill">:Function (4)</span>
-              <span class="schema-pill rel-pill">[:PART_OF (4)]</span>
-              <span class="schema-pill rel-pill">[:DEPENDS_ON]</span>
-            </div>
-          </div>
+        <ul class="legend">
+          <li><i class="swatch changed"></i>Changed</li>
+          <li><i class="swatch consumer"></i>Consumer</li>
+          <li><i class="swatch dependency"></i>Service</li>
+          <li><i class="swatch incident"></i>Incident</li>
+          <li><i class="swatch owner"></i>Owner</li>
+          <li class="legend-hint">Drag nodes · scroll to zoom · pan background</li>
+        </ul>
+      </div>
 
-          <!-- SVG / @falkordb/canvas Graph Viewport Canvas -->
-          <div id="graph" class="graph-viewport"></div>
-
-          <!-- FalkorDB Browser Interactive Node Property Inspector -->
-          <div class="falkor-node-inspector" id="falkor-node-inspector" hidden>
-            <div class="node-inspector-header">
-              <div class="node-inspector-title-wrap">
-                <span class="node-dot" id="node-insp-dot"></span>
-                <span class="node-label-badge" id="node-insp-label">:Service</span>
-                <span class="node-name" id="node-insp-name">edl</span>
-              </div>
-              <button type="button" class="node-insp-close" id="node-insp-close" aria-label="Close inspector">&times;</button>
-            </div>
-            <div class="node-inspector-props" id="node-insp-props"></div>
-            <button type="button" class="btn-filter-cypher" id="btn-filter-cypher">Filter Cypher by Node</button>
-          </div>
-
-          <!-- Floating Bottom Legend Pill -->
-          <div class="floating-legend-pill">
-            <div class="legend-item"><span class="legend-dot changed"></span><span>Changed</span></div>
-            <div class="legend-item"><span class="legend-dot consumer"></span><span>Consumer</span></div>
-            <div class="legend-item"><span class="legend-dot dependency"></span><span>Outgoing dependency</span></div>
-            <div class="legend-item"><span class="legend-dot incident"></span><span>Incident or fix</span></div>
-            <div class="legend-item"><span class="legend-dot owner"></span><span>Owner</span></div>
-          </div>
-        </article>
-      </section>
-
-      <!-- Right Pane: Tool Trace & Cypher Inspector + Evidence Rows -->
-      <aside class="pane-column right-pane">
-        <article class="apple-card inspector-card">
-          <div class="card-header-bar">
-            <span class="card-title">Inspector &amp; Reasoning</span>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <polyline points="18 15 12 9 6 15"></polyline>
-            </svg>
-          </div>
-
-          <!-- Top Segmented Control Tabs -->
-          <div class="pane-segmented-control" role="tablist">
-            <button type="button" class="pane-tab-btn active" id="btn-tab-trace" role="tab">Tool Trace &amp; Cypher</button>
-            <button type="button" class="pane-tab-btn" id="btn-tab-evidence" role="tab">Evidence Rows</button>
-          </div>
-
-          <!-- Tab 1: Tool Trace & Cypher Inspector View -->
-          <div id="pane-tab-trace-view">
-            <!-- Executed FalkorDB Cypher Query Box -->
-            <div class="cypher-query-box">
-              <div class="cypher-header">
-                <span class="cypher-title" id="cypher-box-title">Executed FalkorDB Cypher Query</span>
-                <div class="cypher-actions">
-                  <a href="http://13.236.193.238:3000" target="_blank" rel="noopener" class="btn-falkor-browser" id="btn-open-falkor" title="Open query in live FalkorDB Browser">Run in FalkorDB Browser ↗</a>
-                  <button type="button" class="btn-copy-cypher" id="btn-copy-cypher" title="Copy Cypher query to clipboard">Copy</button>
-                </div>
-              </div>
-              <pre class="cypher-code-block" id="cypher-code-display"><span class="keyword">MATCH</span> (p:PR {id: 142})-[:<span class="label">MODIFIES</span>]-&gt;(f:File)
-<span class="keyword">MATCH</span> (f)-[:<span class="label">DEFINES</span>]-&gt;(fn:Function)
-<span class="keyword">MATCH</span> (fn)-[:<span class="label">SUBJECT_TO</span>]-&gt;(pol:Policy)
-<span class="keyword">RETURN</span> p, f, fn, pol</pre>
-              <!-- FalkorDB Browser GRAPH.QUERY Metadata Footer Strip -->
-              <div class="cypher-footer-strip" id="cypher-footer-strip">
-                <span class="cypher-status-dot"></span>
-                <span class="cypher-meta-text">GRAPH.QUERY | Graph: syzygy | <span id="cypher-meta-counts">9 nodes · 8 edges</span> | Latency: 0.74 ms</span>
-              </div>
-            </div>
-
-            <!-- LLM Reasoning Steps -->
-            <h4 class="reasoning-section-title">LLM Reasoning Steps</h4>
-            <div class="llm-reasoning-steps" id="llm-reasoning-list">
-              <div class="reasoning-step-item">
-                <span class="reasoning-num-badge">1</span>
-                <span>Parse PR diffs for modified paths &amp; dependencies.</span>
-              </div>
-              <div class="reasoning-step-item">
-                <span class="reasoning-num-badge">2</span>
-                <span>Identify impacted functions and caller in-degrees in graph.</span>
-              </div>
-              <div class="reasoning-step-item">
-                <span class="reasoning-num-badge">3</span>
-                <span>Trace multi-hop downstream consumers &amp; outgoing services.</span>
-              </div>
-              <div class="reasoning-step-item">
-                <span class="reasoning-num-badge">4</span>
-                <span>Validate code changes against active policy rules.</span>
-              </div>
-            </div>
-
-            <!-- Tool Trace Execution List -->
-            <h4 class="reasoning-section-title" style="margin-top: 14px;">Graph Tool Calls</h4>
-            <ol id="trace" class="trace tool-trace-list"></ol>
-          </div>
-
-          <!-- Tab 2: Evidence Rows View -->
-          <div id="pane-tab-evidence-view" hidden>
-            <p class="hint-text" style="margin-bottom: 8px;">Every claim cites one of these rows. Falkor-backed reads only.</p>
-            <ul id="evidence" class="claims evidence-list evidence-rows-list"></ul>
-          </div>
-        </article>
-      </aside>
-    </main>
+      <div class="evidence-strip" id="evidence-strip" hidden>
+        <div>
+          <h4>Claims</h4>
+          <ul id="claims" class="mini"></ul>
+        </div>
+        <div>
+          <h4>Evidence</h4>
+          <ul id="evidence" class="mini"></ul>
+        </div>
+        <div>
+          <h4>Tools</h4>
+          <p class="hint" id="agent-note"></p>
+          <ol id="trace" class="mini mono"></ol>
+        </div>
+        <div>
+          <h4>Missing</h4>
+          <ul id="missing" class="mini"></ul>
+        </div>
+      </div>
+    </section>
   </div>
 
-  <script src="/static/app.js?v=8"></script>
+  <script type="module" src="/static/app.js?v=35"></script>
 </body>
 </html>

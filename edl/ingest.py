@@ -65,11 +65,15 @@ def parse_target(value: str) -> tuple[str, str]:
 
 def ingest(value: str) -> tuple[MemoryGraph, dict]:
     """Build the structural graph for a repository. Does not invent a change."""
+    from edl.progress import step as progress
+
     kind, target = parse_target(value)
     if kind == "path":
+        progress("Detecting services / owners / tests in local tree")
         detected = detect_local(Path(target))
         detected["origin"] = {"kind": "path", "value": target}
     else:
+        progress(f"Fetching GitHub tree for {target}")
         owner, name = target.split("/", 1)
         detected = detect_github(owner, name)
         detected["origin"] = {"kind": "github", "value": target}
@@ -79,6 +83,7 @@ def ingest(value: str) -> tuple[MemoryGraph, dict]:
             "a project manifest (package.json, pyproject.toml, go.mod, Cargo.toml, pom.xml), "
             "and folders under services/, apps/, packages/, or cmd/."
         )
+    progress(f"Found {len(detected['services'])} service(s); building graph")
     graph = build_graph(detected)
     overlay_notes: list[str] = []
     overlay = dict(detected.get("evidence_overlay") or {})
@@ -90,11 +95,13 @@ def ingest(value: str) -> tuple[MemoryGraph, dict]:
     if origin.get("kind") == "path":
         from edl.calls import add_python_calls
 
+        progress("Indexing Python call edges (CALLS)")
         call_count = add_python_calls(graph, Path(origin["value"]))
         if call_count:
             overlay_notes.append(f"calls:{call_count}")
     from edl.ci_actions import enrich_overlay_with_actions
 
+    progress("Checking GitHub Actions / evidence overlay (no invented CI)")
     overlay, action_notes = enrich_overlay_with_actions(overlay, origin)
     overlay_notes.extend(action_notes)
     if action_notes and overlay.get("ci"):

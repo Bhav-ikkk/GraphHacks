@@ -119,8 +119,17 @@ class FalkorReader:
         self.selected = selected
 
     def _rows(self, cypher: str) -> list:
-        result = self.selected.ro_query(cypher)
-        return list(getattr(result, "result_set", None) or [])
+        try:
+            result = self.selected.ro_query(cypher)
+            return list(getattr(result, "result_set", None) or [])
+        except Exception as exc:
+            from edl import falkor
+
+            if not falkor.is_timeout(exc):
+                raise
+            self.selected = falkor.reconnect()
+            result = self.selected.ro_query(cypher)
+            return list(getattr(result, "result_set", None) or [])
 
     def node(self, node_id: str) -> dict | None:
         cypher = (

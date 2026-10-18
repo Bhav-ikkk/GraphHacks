@@ -2,12 +2,18 @@
 
 Requires GITHUB_TOKEN (or GH_TOKEN) with pull-requests:write.
 Optional check runs need checks:write.
+
+When the repo has no open PR, open_decision_issue_and_pr() creates an Issue,
+a branch with a decision file, and a PR that links the issue.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import os
+import re
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -22,6 +28,7 @@ def post_decision_to_pr(
     pr_number: int,
     create_check: bool = False,
     dry_run: bool = False,
+    access_token: str | None = None,
 ) -> dict[str, Any]:
     snap = engine.snapshot()
     origin = snap.get("origin") or {}
@@ -42,11 +49,14 @@ def post_decision_to_pr(
             "detail": f"Would comment on {owner}/{name}#{pr_number}",
             "body_preview": body,
         }
-    token = _token()
+    token = (access_token or "").strip() or _token()
     if not token:
         return {
             "status": "blocked",
-            "detail": "Set GITHUB_TOKEN (or GH_TOKEN) in .env to post PR comments.",
+            "detail": (
+                "Connect GitHub in the UI (OAuth) or set GITHUB_TOKEN / GH_TOKEN in .env "
+                "to post PR comments."
+            ),
             "body_preview": body,
         }
     comment = _api(
@@ -70,6 +80,116 @@ def post_decision_to_pr(
         else:
             result["detail"] += " (check skipped: could not resolve PR head SHA)."
     return result
+
+
+def open_decision_issue_and_pr(
+    engine,
+    record: dict,
+    *,
+    dry_run: bool = False,
+    access_token: str | None = None,
+) -> dict[str, Any]:
+    """Create a GitHub Issue + PR when the repo has nothing to comment on yet."""
+    snap = engine.snapshot()
+    origin = snap.get("origin") or {}
+    slug = _repo_slug(origin)
+    if not slug:
+        return {
+            "status": "blocked",
+            "detail": (
+                "Origin is not a GitHub repository. Analyze a github.com URL first."
+            ),
+        }
+    owner, name = slug
+    body = format_pr_markdown(engine, record)
+    state = str(record.get("state") or "UNKNOWN")
+    change_id = str(record.get("change_id") or "change")
+    title = f"Syzygy EDL: {state} · {change_id}"
+    if dry_run:
+        return {
+            "status": "dry_run",
+            "detail": f"Would open issue + PR on {owner}/{name}",
+            "body_preview": body,
+        }
+    token = (access_token or "").strip() or _token()
+    if not token:
+        return {
+            "status": "blocked",
+            "detail": (
+                "Connect GitHub in the UI (OAuth) or set GITHUB_TOKEN / GH_TOKEN in .env."
+            ),
+            "body_preview": body,
+        }
+
+    issue = _api(
+        "POST",
+        f"/repos/{owner}/{name}/issues",
+        token,
+        {"title": title, "body": body},
+    )
+    issue_number = issue.get("number")
+    issue_url = issue.get("html_url")
+
+    meta = _api("GET", f"/repos/{owner}/{name}", token)
+    base = str(meta.get("default_branch") or "main")
+    ref = _api("GET", f"/repos/{owner}/{name}/git/ref/heads/{base}", token)
+    base_sha = ((ref.get("object") or {}).get("sha")) or ""
+    if not base_sha:
+        return {
+            "status": "partial",
+            "detail": f"Opened issue #{issue_number}, but could not read default branch {base}.",
+            "issue_url": issue_url,
+            "issue_number": issue_number,
+        }
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    safe = re.sub(r"[^a-zA-Z0-9._-]+", "-", change_id).strip("-")[:40] or "change"
+    branch = f"syzygy/edl-{safe}-{stamp}"
+    _api(
+        "POST",
+        f"/repos/{owner}/{name}/git/refs",
+        token,
+        {"ref": f"refs/heads/{branch}", "sha": base_sha},
+    )
+    path = f".syzygy/decision-{stamp}.md"
+    content = base64.b64encode(body.encode("utf-8")).decode("ascii")
+    _api(
+        "PUT",
+        f"/repos/{owner}/{name}/contents/{path}",
+        token,
+        {
+            "message": f"chore(syzygy): record {state} decision for {change_id}",
+            "content": content,
+            "branch": branch,
+        },
+    )
+    pr_body = (
+        f"Opened automatically by Syzygy EDL after a graph-backed review.\n\n"
+        f"Related issue: #{issue_number}\n\n"
+        f"{body}"
+    )
+    pull = _api(
+        "POST",
+        f"/repos/{owner}/{name}/pulls",
+        token,
+        {
+            "title": title,
+            "head": branch,
+            "base": base,
+            "body": pr_body,
+            "draft": False,
+        },
+    )
+    return {
+        "status": "opened",
+        "detail": f"Opened issue #{issue_number} and PR #{pull.get('number')} on {owner}/{name}",
+        "issue_url": issue_url,
+        "issue_number": issue_number,
+        "pr_url": pull.get("html_url"),
+        "pr_number": pull.get("number"),
+        "branch": branch,
+        "body_preview": body[:500],
+    }
 
 
 def format_pr_markdown(engine, record: dict) -> str:
@@ -174,6 +294,19 @@ def _git_remote_slug(path: str) -> tuple[str, str] | None:
     return None
 
 
+def explain_github_error(code: int, detail: str = "") -> str:
+    text = (detail or "").lower()
+    if code in {401, 403}:
+        return "GitHub refused this session. Disconnect and Connect GitHub again, then retry."
+    if code == 404:
+        return "That pull request was not found on this repository. Pick an open PR from the list."
+    if code == 422:
+        return "GitHub rejected the comment. The pull request may be locked, or the number is invalid."
+    if "bad credentials" in text:
+        return "GitHub credentials expired. Disconnect and Connect GitHub again."
+    return f"GitHub could not post that comment ({code})."
+
+
 def _token() -> str:
     return (
         os.environ.get("GITHUB_TOKEN", "").strip()
@@ -202,7 +335,7 @@ def _api(method: str, path: str, token: str, payload: dict | None = None) -> dic
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:400]
-        raise RuntimeError(f"GitHub API {method} {path} failed: {exc.code} {detail}") from exc
+        raise RuntimeError(explain_github_error(exc.code, detail)) from exc
 
 
 def _pr_head_sha(owner: str, name: str, pr_number: int, token: str) -> str | None:

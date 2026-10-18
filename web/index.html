@@ -6,8 +6,8 @@
   <title>Syzygy EDL · Graph-backed decisions</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css?v=35" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Sans+3:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css?v=46" />
 </head>
 <body>
   <div id="toast" class="toast" hidden>
@@ -32,6 +32,11 @@
         <div class="chips">
           <span class="chip" id="backend">Graph offline</span>
           <span class="chip" id="llm-chip">LLM off</span>
+          <span class="chip" id="gh-chip">GitHub off</span>
+        </div>
+        <div class="gh-row">
+          <a id="gh-login" class="btn ghost gh-btn" href="/auth/github/login">Connect GitHub</a>
+          <button type="button" id="gh-logout" class="btn ghost gh-btn quiet is-hidden" hidden>Disconnect</button>
         </div>
       </header>
 
@@ -50,82 +55,101 @@
         </button>
       </nav>
 
-      <section class="block" id="block-analyze">
-        <h2>Repository</h2>
-        <form id="ingest-form" class="stack">
-          <input id="target" placeholder="GitHub URL or local folder" autocomplete="off" />
-          <button type="submit" id="analyze-btn" class="btn primary">
-            <span>Analyze &amp; publish</span>
-          </button>
-        </form>
-        <p class="hint" id="origin-note"></p>
-        <p class="error" id="ingest-error" hidden></p>
-      </section>
-
-      <section class="block" id="block-scope">
-        <h2>Change scope</h2>
-        <p class="hint" id="change-help">Analyze a repo first</p>
-        <div id="suggestions" class="file-list" hidden>
-          <div id="suggestion-list"></div>
-        </div>
-        <details class="advanced">
-          <summary>Custom paths / refs</summary>
-          <input id="files" placeholder="path/to/file.py" autocomplete="off" />
-          <div class="twin">
-            <input id="base" placeholder="base" autocomplete="off" />
-            <input id="head" placeholder="head" autocomplete="off" />
-          </div>
-          <button type="button" id="rescope" class="btn ghost" disabled>Rescope</button>
-        </details>
-        <p class="hint" id="scope-note"></p>
-        <p class="error" id="scope-error" hidden></p>
-        <select id="change" class="sr-only" aria-label="Active change"></select>
-      </section>
-
-      <section class="block grow" id="block-decide">
-        <h2>Decision path</h2>
-        <div class="seg" role="tablist">
-          <button type="button" class="seg-btn active" data-path="review">Review</button>
-          <button type="button" class="seg-btn" data-path="agent">Agent</button>
-          <button type="button" class="seg-btn" data-path="llm">+ LLM</button>
-        </div>
-        <p class="hint" id="path-help">Policy sets the state. Agents only pick named tools.</p>
-        <button type="button" id="run" class="btn primary" disabled>Run review</button>
-        <p class="error" id="review-error" hidden></p>
-
-        <div id="decision" class="decision" hidden>
-          <div id="lift" class="lift" hidden>
-            <span class="lift-kicker">Graph lift</span>
-            <p id="lift-text"></p>
-          </div>
-          <p class="kicker" id="kicker"></p>
-          <h3 id="state">—</h3>
-          <p class="rationale" id="rationale"></p>
-          <ul class="policies" id="policies"></ul>
-          <h4>Impact</h4>
-          <ul id="impact-list" class="mini"></ul>
-          <h4>Next</h4>
-          <ul id="next-steps" class="mini"></ul>
-          <div id="narration-box" hidden>
-            <h4>Narration</h4>
-            <p id="narration" class="narration"></p>
-          </div>
-          <div class="action-row">
-            <button type="button" id="act" class="btn ghost">Issue</button>
-            <button type="button" id="notify" class="btn ghost">Notify</button>
-          </div>
-          <details class="advanced soon">
-            <summary>GitHub PR <em>next</em></summary>
-            <p class="hint">PR comment + check gate is the remaining integration.</p>
-            <div class="twin">
-              <input id="pr-number" type="number" min="1" placeholder="PR #" disabled />
-              <button type="button" id="pr-comment" class="btn ghost" disabled>Post</button>
+      <div class="rail-body">
+        <section class="block" id="block-analyze">
+          <h2>Repository</h2>
+          <form id="ingest-form" class="stack">
+            <div id="repo-picker" class="repo-picker" hidden>
+              <label class="field-label" for="repo-search">Your GitHub repositories</label>
+              <input id="repo-search" placeholder="Search repos…" autocomplete="off" />
+              <select id="repo-select" size="5" aria-label="Select a repository">
+                <option value="">Loading repositories…</option>
+              </select>
+              <p class="hint" id="repo-hint">Pick a repo, then Analyze.</p>
             </div>
+            <label class="field-label" for="target" id="target-label">GitHub URL or local folder</label>
+            <input id="target" placeholder="https://github.com/owner/name or ." autocomplete="off" />
+            <button type="submit" id="analyze-btn" class="btn primary">
+              <span>Analyze &amp; publish</span>
+            </button>
+          </form>
+          <p class="hint" id="origin-note"></p>
+          <p class="error" id="ingest-error" hidden></p>
+        </section>
+
+        <section class="block" id="block-scope">
+          <h2>Change scope</h2>
+          <p class="hint" id="change-help">Analyze a repo first</p>
+          <div id="suggestions" class="file-list" hidden>
+            <div id="suggestion-list"></div>
+          </div>
+          <details class="advanced">
+            <summary>Custom paths / refs</summary>
+            <input id="files" placeholder="path/to/file.py" autocomplete="off" />
+            <div class="twin">
+              <input id="base" placeholder="base" autocomplete="off" />
+              <input id="head" placeholder="head" autocomplete="off" />
+            </div>
+            <button type="button" id="rescope" class="btn ghost" disabled>Rescope</button>
           </details>
-          <p id="action-reason" class="hint"></p>
-          <p id="action-result" class="mono"></p>
-        </div>
-      </section>
+          <p class="hint" id="scope-note"></p>
+          <p class="error" id="scope-error" hidden></p>
+          <select id="change" class="sr-only" aria-label="Active change"></select>
+        </section>
+
+        <section class="block" id="block-decide">
+          <h2>Decision path</h2>
+          <div class="seg" role="tablist">
+            <button type="button" class="seg-btn active" data-path="review">Review</button>
+            <button type="button" class="seg-btn" data-path="agent">Agent</button>
+            <button type="button" class="seg-btn" data-path="llm">+ LLM</button>
+          </div>
+          <p class="hint" id="path-help">Policy sets the state. Agents only pick named tools.</p>
+          <button type="button" id="run" class="btn primary" disabled>Run review</button>
+          <p class="error" id="review-error" hidden></p>
+
+          <div id="decision" class="decision" hidden>
+            <div id="lift" class="lift" hidden>
+              <span class="lift-kicker">Graph lift</span>
+              <p id="lift-text"></p>
+            </div>
+            <p class="kicker" id="kicker"></p>
+            <h3 id="state">—</h3>
+            <p class="rationale" id="rationale"></p>
+            <ul class="policies" id="policies"></ul>
+            <h4>Impact</h4>
+            <ul id="impact-list" class="mini"></ul>
+            <h4>Next</h4>
+            <ul id="next-steps" class="mini"></ul>
+            <div id="narration-box" hidden>
+              <h4>Narration</h4>
+              <p id="narration" class="narration"></p>
+            </div>
+            <div class="action-row">
+              <button type="button" id="act" class="btn ghost">Issue</button>
+              <button type="button" id="notify" class="btn ghost">Notify</button>
+            </div>
+            <details class="advanced" id="gh-pr-box" open>
+              <summary>GitHub PR</summary>
+              <p class="hint" id="gh-pr-help">Connect GitHub above to post the decision onto a pull request.</p>
+              <select id="pr-select" aria-label="Open pull requests">
+                <option value="">Open pull requests…</option>
+              </select>
+              <div class="twin">
+                <input id="pr-number" type="number" min="1" placeholder="PR #" />
+                <button type="button" id="pr-comment" class="btn ghost" disabled>Post</button>
+              </div>
+              <button type="button" id="pr-open" class="btn ghost" disabled>Open issue + PR</button>
+              <label class="check-row">
+                <input type="checkbox" id="pr-check" />
+                <span>Also create a Check Run</span>
+              </label>
+            </details>
+            <p id="action-reason" class="hint"></p>
+            <p id="action-result" class="mono"></p>
+          </div>
+        </section>
+      </div>
 
       <footer class="rail-foot">
         <span>MCP</span>
@@ -165,9 +189,8 @@
         <div id="graph" class="canvas">
           <falkordb-canvas id="falkor-canvas" style="width:100%;height:100%;display:block;"></falkordb-canvas>
           <div id="graph-empty" class="empty">
-            <div class="empty-orb" aria-hidden="true"></div>
             <strong>No graph yet</strong>
-            <p>Analyze a repository to publish into FalkorDB.<br/>Then run Review / Agent to see blast radius by mode.</p>
+            <p>Connect GitHub and pick a repository, or paste a URL / local path.<br/>Then run Review to see blast radius by mode.</p>
           </div>
         </div>
 
@@ -182,11 +205,12 @@
 
         <ul class="legend">
           <li><i class="swatch changed"></i>Changed</li>
-          <li><i class="swatch consumer"></i>Consumer</li>
+          <li><i class="swatch consumer"></i>Function</li>
           <li><i class="swatch dependency"></i>Service</li>
           <li><i class="swatch incident"></i>Incident</li>
           <li><i class="swatch owner"></i>Owner</li>
-          <li class="legend-hint">Drag nodes · scroll to zoom · pan background</li>
+          <li><i class="swatch fix"></i>Test</li>
+          <li class="legend-hint">Click a node · drag · scroll zoom</li>
         </ul>
       </div>
 
@@ -212,6 +236,6 @@
     </section>
   </div>
 
-  <script type="module" src="/static/app.js?v=35"></script>
+  <script type="module" src="/static/app.js?v=46"></script>
 </body>
 </html>

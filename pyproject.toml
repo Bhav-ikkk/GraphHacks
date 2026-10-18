@@ -15,6 +15,7 @@ dependencies = [
   "typer==0.15.1",
   "click>=8.1.7,<8.2",
   "falkordb==1.1.2",
+  "itsdangerous==2.2.0",
 ]
 
 [project.scripts]

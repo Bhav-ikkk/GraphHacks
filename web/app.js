@@ -1,4 +1,4 @@
-import "./vendor/falkordb-canvas.js?v=35";
+import "./vendor/falkordb-canvas.js?v=46";
 
 const stateLabel = {
   PROCEED: "Proceed",
@@ -27,13 +27,22 @@ const pathRunLabel = {
 };
 
 const ROLE_COLOR = {
-  changed: "#fb7185",
-  direct: "#fb7185",
-  consumer: "#60a5fa",
-  dependency: "#fbbf24",
-  incident: "#e879f9",
-  fix: "#e879f9",
-  owner: "#2dd4a8",
+  changed: "#e879c8",
+  direct: "#e879c8",
+  consumer: "#3b82f6",
+  dependency: "#c17a3a",
+  incident: "#c084fc",
+  fix: "#ec6bb8",
+  owner: "#34d399",
+};
+
+const EDGE_COLOR = {
+  CALLS: "#7eb6e8",
+  PART_OF: "#d4b562",
+  DEPENDS_ON: "#5ba3d9",
+  OWNS: "#3ecf8e",
+  AFFECTED: "#c084fc",
+  COVERS: "#c4d35a",
 };
 
 const JOBS = {
@@ -44,6 +53,8 @@ const JOBS = {
   llm: { label: "Agent + LLM", steps: ["LLM picks tools", "Graph reads", "Policy decides"] },
   notify: { label: "Notify", steps: ["Draft message"] },
   act: { label: "Issue", steps: ["Action gate"] },
+  pr: { label: "PR", steps: ["Post comment"] },
+  openpr: { label: "GitHub", steps: ["Open issue", "Branch + PR"] },
 };
 
 let snapshot = null;
@@ -55,6 +66,9 @@ let statusSteps = [];
 let previewGraph = null;
 let animating = true;
 let fitCount = 0;
+let githubStatus = { connected: false, oauth_configured: false };
+let repoCache = [];
+let repoSearchTimer = null;
 let layoutMode = "force";
 let lastGraph = null;
 let selectedId = null;
@@ -176,37 +190,233 @@ function backendChip(next) {
 
 function llmChip(next) {
   const chip = $("llm-chip");
+  if (!chip) return;
   if (next.llm_ready) {
     chip.textContent = next.llm_model || "LLM ready";
     chip.className = "chip ok";
-  } else {
+    return;
+  }
+  if (next.llm_ready === false) {
     chip.textContent = "LLM off";
     chip.className = "chip";
   }
+}
+
+function renderGithub(status) {
+  githubStatus = status || { connected: false, oauth_configured: false };
+  const chip = $("gh-chip");
+  const login = $("gh-login");
+  const logout = $("gh-logout");
+  const help = $("gh-pr-help");
+  const prInput = $("pr-number");
+  const prBtn = $("pr-comment");
+  const prOpen = $("pr-open");
+  const picker = $("repo-picker");
+  if (!chip) return;
+
+  if (githubStatus.connected) {
+    chip.textContent = `GH · ${githubStatus.login || "connected"}`;
+    chip.className = "chip ok";
+    if (login) {
+      login.hidden = true;
+      login.classList.add("is-hidden");
+    }
+    if (logout) {
+      logout.hidden = false;
+      logout.classList.remove("is-hidden");
+    }
+    if (help) {
+      help.textContent =
+        "Pick an open PR and Post, or Open issue + PR if this repo has none.";
+    }
+    if (prInput) prInput.disabled = false;
+    if (prBtn) prBtn.disabled = !current;
+    if (prOpen) prOpen.disabled = !current;
+    if ($("pr-select")) $("pr-select").disabled = false;
+    if (picker) picker.hidden = false;
+    loadGithubRepos($("repo-search")?.value || "");
+    loadGithubPulls();
+  } else if (githubStatus.oauth_configured) {
+    chip.textContent = "GitHub off";
+    chip.className = "chip";
+    if (login) {
+      login.hidden = false;
+      login.classList.remove("is-hidden");
+      login.href = "/auth/github/login";
+      login.textContent = "Connect GitHub";
+    }
+    if (logout) {
+      logout.hidden = true;
+      logout.classList.add("is-hidden");
+    }
+    if (help) help.textContent = "Connect GitHub above to post the decision onto a pull request.";
+    if (prInput) prInput.disabled = true;
+    if (prBtn) prBtn.disabled = true;
+    if (prOpen) prOpen.disabled = true;
+    if ($("pr-select")) {
+      $("pr-select").disabled = true;
+      $("pr-select").innerHTML = '<option value="">Connect GitHub to list PRs</option>';
+    }
+    if (picker) picker.hidden = true;
+    repoCache = [];
+  } else {
+    chip.textContent = "GitHub unset";
+    chip.className = "chip bad";
+    if (login) {
+      login.hidden = false;
+      login.classList.remove("is-hidden");
+      login.href = "#";
+      login.textContent = "OAuth not configured";
+      login.onclick = (event) => {
+        event.preventDefault();
+        showError("review-error", new Error("Set GITHUB_OAUTH_CLIENT_ID/SECRET in .env"));
+      };
+    }
+    if (logout) {
+      logout.hidden = true;
+      logout.classList.add("is-hidden");
+    }
+    if (picker) picker.hidden = true;
+  }
+}
+
+function fillRepoSelect(repos) {
+  const select = $("repo-select");
+  const hint = $("repo-hint");
+  if (!select) return;
+  select.innerHTML = "";
+  if (!repos.length) {
+    const empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = "No repositories found";
+    select.appendChild(empty);
+    if (hint) hint.textContent = "No matches. Try another search, or paste a URL below.";
+    return;
+  }
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = `Select a repository (${repos.length})`;
+  select.appendChild(placeholder);
+  for (const repo of repos) {
+    const option = document.createElement("option");
+    option.value = repo.html_url || `https://github.com/${repo.full_name}`;
+    const lock = repo.private ? "private" : "public";
+    const lang = repo.language ? ` · ${repo.language}` : "";
+    option.textContent = `${repo.full_name} (${lock}${lang})`;
+    select.appendChild(option);
+  }
+  if (hint) hint.textContent = "Pick a repo, then Analyze — or paste any URL / local path below.";
+}
+
+async function loadGithubRepos(query) {
+  const select = $("repo-select");
+  const hint = $("repo-hint");
+  if (!githubStatus.connected || !select) return;
+  select.innerHTML = "";
+  const loading = document.createElement("option");
+  loading.value = "";
+  loading.textContent = "Loading repositories…";
+  select.appendChild(loading);
+  if (hint) hint.textContent = "Fetching from GitHub…";
+  try {
+    const q = encodeURIComponent(query || "");
+    const body = await api(`/api/github/repos?limit=40&q=${q}`);
+    repoCache = body.repos || [];
+    fillRepoSelect(repoCache);
+  } catch (error) {
+    select.innerHTML = "";
+    const fail = document.createElement("option");
+    fail.value = "";
+    fail.textContent = "Could not load repos";
+    select.appendChild(fail);
+    if (hint) hint.textContent = shortError(error);
+  }
+}
+
+async function loadGithubPulls() {
+  const select = $("pr-select");
+  const help = $("gh-pr-help");
+  if (!select) return;
+  if (!githubStatus.connected) {
+    select.innerHTML = '<option value="">Connect GitHub to list PRs</option>';
+    select.disabled = true;
+    return;
+  }
+  select.disabled = false;
+  select.innerHTML = '<option value="">Loading pull requests…</option>';
+  try {
+    const body = await api("/api/github/pulls");
+    const pulls = body.pulls || [];
+    select.innerHTML = "";
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = pulls.length
+      ? `Open pull requests (${pulls.length})`
+      : (body.detail || "No open pull requests");
+    select.appendChild(placeholder);
+    for (const pull of pulls) {
+      const option = document.createElement("option");
+      option.value = String(pull.number);
+      option.textContent = `#${pull.number} ${pull.title}`;
+      select.appendChild(option);
+    }
+    if (help && githubStatus.connected) {
+      help.textContent = pulls.length
+        ? "Pick an open PR, then Post — or Open issue + PR for a fresh review thread."
+        : (body.detail || "No open PRs. Click Open issue + PR to create both.");
+    }
+  } catch (error) {
+    select.innerHTML = "";
+    const fail = document.createElement("option");
+    fail.value = "";
+    fail.textContent = shortError(error);
+    select.appendChild(fail);
+  }
+}
+
+function shortCaption(label, kind) {
+  const raw = String(label || "");
+  if (kind === "function") {
+    const bit = raw.split(".").pop() || raw;
+    return bit.length > 14 ? `${bit.slice(0, 12)}…` : bit;
+  }
+  return raw.length > 16 ? `${raw.slice(0, 14)}…` : raw;
+}
+
+function nodeSize(role, kind, count) {
+  const dense = count > 18;
+  if (kind === "function") return dense ? 5 : 6;
+  if (kind === "test") return dense ? 4.5 : 5.5;
+  if (role === "changed" || role === "direct") return dense ? 7 : 8;
+  if (kind === "service" || role === "dependency") return dense ? 8 : 9;
+  if (kind === "team" || role === "owner") return dense ? 6 : 7;
+  return dense ? 5.5 : 6.5;
 }
 
 function toCanvasData(graph) {
   const nodes = [];
   const links = [];
   const seen = new Set();
-  for (const node of graph?.nodes || []) {
+  const source = graph?.nodes || [];
+  const dense = source.length > 24;
+  for (const node of source) {
     if (!node?.id || seen.has(node.id)) continue;
     seen.add(node.id);
     const role = node.role || "dependency";
-    const hot = role === "changed" || role === "direct";
+    const kind = node.kind || "";
     const label = String(node.label || node.id);
     nodes.push({
       id: node.id,
-      labels: [role, node.kind || "node"].filter(Boolean),
+      labels: [kind || role, "node"].filter(Boolean),
       color: ROLE_COLOR[role] || "#94a3b8",
       visible: true,
-      size: hot ? 28 : 22,
+      size: nodeSize(role, kind, source.length),
       caption: "name",
       data: {
-        name: label.length > 18 ? `${label.slice(0, 16)}…` : label,
+        name: shortCaption(label, kind),
         fullName: label,
         role,
-        kind: node.kind || "",
+        kind,
         tier: node.tier ?? "",
         hops: node.hops ?? "",
         id: node.id,
@@ -219,14 +429,15 @@ function toCanvasData(graph) {
     if (!edge?.source || !edge?.target) continue;
     if (!idSet.has(edge.source) || !idSet.has(edge.target)) continue;
     i += 1;
+    const rel = edge.label || "RELATED";
     links.push({
       id: i,
-      relationship: edge.label || "RELATED",
-      color: "#6b7c91",
+      relationship: "",
+      color: EDGE_COLOR[rel] || "#4b5563",
       source: edge.source,
       target: edge.target,
       visible: true,
-      data: {},
+      data: { relationship: rel },
     });
   }
   return { nodes, links };
@@ -237,16 +448,13 @@ function sizeCanvas() {
   const host = $("graph");
   const el = canvasEl();
   if (!host || !el || typeof el.setWidth !== "function") return;
-  // Measure the shell (flex child), never the canvas element itself — FalkorDB
-  // Canvas can expand its host and create a resize feedback loop.
+  // Measure the shell, never the canvas element — FalkorDB Canvas can expand
+  // its host and create a resize feedback loop.
   const box = shell?.getBoundingClientRect?.() || host.getBoundingClientRect();
   const legend = document.querySelector(".legend");
-  const legendH = legend?.getBoundingClientRect?.().height || 0;
-  const width = Math.max(Math.floor(box.width || host.clientWidth || 640), 280);
-  const height = Math.max(
-    Math.floor((box.height || host.clientHeight || 420) - legendH),
-    280
-  );
+  const legendH = Math.max(legend?.getBoundingClientRect?.().height || 0, 34);
+  const width = Math.max(Math.floor(box.width || host.clientWidth || 640), 320);
+  const height = Math.max(Math.floor((box.height || 480) - legendH), 320);
   if (el.config?.width === width && el.config?.height === height) return;
   el.setWidth(width);
   el.setHeight(height);
@@ -289,24 +497,14 @@ function fitGraph() {
     const spanX = Math.max(maxX - minX, 80);
     const spanY = Math.max(maxY - minY, 80);
     const host = $("graph");
-    const pad = 0.72;
+    const dense = nodes.length > 18;
+    const pad = 0.82;
     const zx = ((host?.clientWidth || 800) * pad) / spanX;
     const zy = ((host?.clientHeight || 560) * pad) / spanY;
-    const target = Math.max(0.55, Math.min(2.4, Math.min(zx, zy)));
+    const target = Math.max(0.35, Math.min(dense ? 1.05 : 1.35, Math.min(zx, zy)));
     fg.centerAt((minX + maxX) / 2, (minY + maxY) / 2, 280);
     fg.zoom(target, 280);
     fitCount += 1;
-    // After the layout finds a readable frame, freeze motion so the demo stays framed.
-    // Play button re-enables the force loop.
-    if (fitCount >= 2 && animating) {
-      animating = false;
-      const play = $("g-play");
-      if (play) {
-        play.setAttribute("aria-pressed", "false");
-        play.textContent = "▶";
-      }
-      if (typeof el.setAnimation === "function") el.setAnimation(false);
-    }
   } catch (_) {
     /* ignore */
   }
@@ -322,40 +520,42 @@ function configureCanvas() {
   if (!el || typeof el.setConfig !== "function") return;
   sizeCanvas();
   el.setConfig({
-    backgroundColor: "#080c11",
-    foregroundColor: "#eef3f8",
+    backgroundColor: "#0f1115",
+    foregroundColor: "#d7dce3",
     layoutMode,
     animation: animating,
-    captionsKeys: ["name"],
+    captionsKeys: [],
     pinOnDragEnd: false,
     simulation: {
-      centerStrength: 0.045,
-      chargeStrength: -580,
-      velocityDecay: 0.22,
-      alphaMin: 0.0008,
-      warmupTicks: 60,
+      centerStrength: 0.04,
+      chargeStrength: -420,
+      linkDistance: 46,
+      velocityDecay: 0.28,
+      alphaMin: 0.001,
+      warmupTicks: 120,
       chargeDistanceMax: "auto",
     },
     interaction: {
       zoomToFitPadding: 0.22,
-      zoomToFitMaxZoom: 2.4,
-      zoomToFitDelay: 200,
-      tooltipFontSize: 13,
+      zoomToFitMaxZoom: 1.2,
+      zoomToFitDelay: 180,
+      tooltipFontSize: 12,
     },
     nodeStyle: {
       fontFamily: "IBM Plex Mono, monospace",
-      textFillRatio: 0.72,
-      fontSize: 11,
-      glowColor: [45, 212, 168],
-      glowMaxOpacity: 0.55,
-      glowSpread: 18,
+      textFillRatio: 0,
+      fontSize: 9,
+      glowColor: [193, 122, 58],
+      glowMaxOpacity: 0.18,
+      glowSpread: 6,
     },
     linkStyle: {
       fontFamily: "IBM Plex Mono, monospace",
+      width: 1,
     },
     largeGraph: {
       enabled: true,
-      lowZoomThreshold: 0.45,
+      lowZoomThreshold: 1.8,
       skipLabelsAtLowZoom: true,
       skipArrowsAtLowZoom: true,
       skipLinkLabelsAtLowZoom: true,
@@ -500,6 +700,7 @@ function renderSnapshot(next) {
   snapshot = next;
   backendChip(next);
   llmChip(next);
+  if (next.github) renderGithub(next.github);
   previewGraph = next.graph_preview || null;
 
   $("origin-note").textContent = next.note || "";
@@ -711,7 +912,14 @@ function renderRecord(payload, mode, agentMeta) {
   $("action-reason").textContent = action.reason || "";
   $("act").disabled = action.status !== "ready";
   if (!agentMeta?.narration) $("action-result").textContent = "";
+  if ($("pr-comment")) $("pr-comment").disabled = !githubStatus.connected;
+  if ($("pr-open")) $("pr-open").disabled = !githubStatus.connected;
   drawGraph(record.graph);
+  requestAnimationFrame(() => {
+    sizeCanvas();
+    setTimeout(sizeCanvas, 80);
+  });
+  if (githubStatus.connected) loadGithubPulls();
 }
 
 async function runDecide() {
@@ -833,7 +1041,7 @@ function wireGraphControls() {
       clearTimeout(t);
       t = setTimeout(() => {
         sizeCanvas();
-        if (lastGraph?.nodes?.length) fitGraph(false);
+        if (lastGraph?.nodes?.length) fitGraph();
       }, 100);
     });
     ro.observe(shell);
@@ -848,6 +1056,17 @@ async function boot() {
   renderSnapshot(snapshot);
   setDecidePath("review");
   if (!snapshot.graph_preview) drawGraph(null);
+
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("github") === "connected") {
+    history.replaceState({}, "", "/");
+    $("action-result").textContent = `GitHub connected as ${githubStatus.login || "user"}.`;
+  } else if (params.get("github_error")) {
+    const err = params.get("github_error");
+    history.replaceState({}, "", "/");
+    showError("review-error", new Error(`GitHub OAuth: ${err}`));
+  }
+
   window.addEventListener("resize", () => {
     sizeCanvas();
     if (current?.record?.graph) drawGraph(current.record.graph);
@@ -963,6 +1182,109 @@ $("notify").addEventListener("click", async () => {
     const note = body.notification || {};
     $("action-result").textContent =
       `${note.status}. ${note.detail || ""}` + (note.draft_path ? ` · ${note.draft_path}` : "");
+  } catch (error) {
+    showError("review-error", error);
+  } finally {
+    setBusy(false);
+  }
+});
+
+$("gh-logout")?.addEventListener("click", async () => {
+  try {
+    const body = await api("/auth/github/logout", { method: "POST", body: "{}" });
+    renderGithub(body.github || { connected: false, oauth_configured: true });
+    $("action-result").textContent = "GitHub disconnected.";
+  } catch (error) {
+    showError("review-error", error);
+  }
+});
+
+$("repo-select")?.addEventListener("change", () => {
+  const url = $("repo-select").value;
+  if (url) $("target").value = url;
+});
+
+$("repo-select")?.addEventListener("dblclick", () => {
+  const url = $("repo-select").value;
+  if (!url) return;
+  $("target").value = url;
+  $("ingest-form").requestSubmit();
+});
+
+$("repo-search")?.addEventListener("input", () => {
+  clearTimeout(repoSearchTimer);
+  repoSearchTimer = setTimeout(() => {
+    loadGithubRepos($("repo-search").value.trim());
+  }, 280);
+});
+
+$("pr-select")?.addEventListener("change", () => {
+  const value = $("pr-select").value;
+  if (value && $("pr-number")) $("pr-number").value = value;
+});
+
+$("pr-comment")?.addEventListener("click", async () => {
+  if (!current) return;
+  if (!githubStatus.connected) {
+    showError("review-error", new Error("Connect GitHub first."));
+    return;
+  }
+  const prValue = Number($("pr-number").value || $("pr-select")?.value || 0);
+  if (!prValue) {
+    showError(
+      "review-error",
+      new Error("No open PR selected. Use Open issue + PR, or enter a PR number.")
+    );
+    return;
+  }
+  setBusy(true, "pr");
+  showError("review-error", null);
+  try {
+    const body = await api("/api/github/pr-comment", {
+      method: "POST",
+      body: JSON.stringify({
+        change_id: current.record.change_id,
+        mode: current.mode,
+        pr: prValue,
+        check: Boolean($("pr-check")?.checked),
+        dry_run: false,
+      }),
+    });
+    const gh = body.github || {};
+    $("action-result").textContent =
+      `${gh.status}. ${gh.detail || ""}` + (gh.comment_url ? ` ${gh.comment_url}` : "");
+  } catch (error) {
+    showError("review-error", error);
+  } finally {
+    setBusy(false);
+  }
+});
+
+$("pr-open")?.addEventListener("click", async () => {
+  if (!current) return;
+  if (!githubStatus.connected) {
+    showError("review-error", new Error("Connect GitHub first."));
+    return;
+  }
+  setBusy(true, "openpr");
+  showError("review-error", null);
+  try {
+    const body = await api("/api/github/open-decision", {
+      method: "POST",
+      body: JSON.stringify({
+        change_id: current.record.change_id,
+        mode: current.mode,
+        dry_run: false,
+      }),
+    });
+    const gh = body.github || {};
+    const bits = [gh.status, gh.detail].filter(Boolean);
+    if (gh.issue_url) bits.push(gh.issue_url);
+    if (gh.pr_url) bits.push(gh.pr_url);
+    $("action-result").textContent = bits.join(" · ");
+    if (gh.pr_number && $("pr-number")) $("pr-number").value = String(gh.pr_number);
+    await loadGithubPulls();
+    if (gh.pr_number && $("pr-select")) $("pr-select").value = String(gh.pr_number);
   } catch (error) {
     showError("review-error", error);
   } finally {

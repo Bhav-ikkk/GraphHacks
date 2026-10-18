@@ -60,7 +60,34 @@ python -m edl serve
 # → http://127.0.0.1:8000
 # Analyze → scope files → Run review (or Run agent)
 # Compare Full graph / 1-hop / Graph off — click the mode chips after review
+# Connect GitHub (OAuth App) → post decision onto a PR
 ```
+
+### GitHub OAuth App (UI Connect GitHub)
+
+1. Create an OAuth App at [GitHub Developer Settings](https://github.com/settings/developers).
+2. Set **Homepage URL** and **Authorization callback URL** to the same value, e.g. `http://127.0.0.1:8000/` (must match `.env` exactly).
+3. Put Client ID + Client Secret in `.env` (`GITHUB_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_SECRET`, `GITHUB_OAUTH_REDIRECT_URI`).
+4. In the UI click **Connect GitHub**, then after a review use **GitHub PR → Post**.
+
+Scopes used: `repo read:user` (PR comments + identity). Never commit Client Secrets.
+
+### Deploy (hackathon / demo)
+
+| Piece | Where | Notes |
+| --- | --- | --- |
+| **Syzygy API + UI** | [Railway](https://railway.app), [Render](https://render.com), [Fly.io](https://fly.io), or any Linux VPS | Run `uvicorn edl.api:app --host 0.0.0.0 --port $PORT` (or `python -m edl serve` with `PORT`) |
+| **FalkorDB** | [FalkorDB Cloud](https://www.falkordb.com/) or keep your existing host | Set `FALKORDB_*` in the host's env |
+| **Secrets** | Platform env vars | Copy from `.env.example`; never bake secrets into the image |
+
+After you get a public URL (e.g. `https://syzygy-demo.up.railway.app/`):
+
+1. Update the OAuth App **Homepage** + **callback** to that URL (trailing slash must match).
+2. Set `GITHUB_OAUTH_REDIRECT_URI` to the same URL.
+3. Set a long `SYZYGY_SESSION_SECRET`.
+4. Redeploy / restart.
+
+Local demo stays on `http://127.0.0.1:8000/` — no deploy required for judging if you screen-share localhost.
 
 ### Evidence modes (what the three chips mean)
 

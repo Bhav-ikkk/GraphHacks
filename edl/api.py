@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import mimetypes
+import secrets
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.middleware.sessions import SessionMiddleware
 
+from edl import github_oauth
 from edl.change import ChangeError
 from edl.engine import Engine
 from edl.ingest import IngestError
@@ -31,6 +34,12 @@ except PolicyError as exc:
     raise RuntimeError(f"policies/policies.yaml failed to load: {exc}") from exc
 
 app = FastAPI(title="Syzygy EDL", version="0.1.0")
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=github_oauth.session_secret(),
+    same_site="lax",
+    https_only=False,
+)
 app.mount("/static", StaticFiles(directory=WEB), name="static")
 
 
@@ -88,8 +97,92 @@ class AgentIn(BaseModel):
 
 
 @app.get("/")
-def index() -> FileResponse:
+def index(request: Request, code: str | None = None, state: str | None = None, error: str | None = None):
+    """Serve the UI. Also handles OAuth callback when redirect_uri is http://127.0.0.1:8000/."""
+    if error:
+        return RedirectResponse(url=f"/?github_error={error}", status_code=302)
+    if code:
+        expected = request.session.get("oauth_state")
+        if not state or not expected or state != expected:
+            return RedirectResponse(url="/?github_error=state_mismatch", status_code=302)
+        try:
+            auth = github_oauth.exchange_code(code)
+            github_oauth.store_session(request.session, auth)
+            request.session.pop("oauth_state", None)
+        except RuntimeError as exc:
+            detail = urllib_quote(str(exc)[:120])
+            return RedirectResponse(url=f"/?github_error={detail}", status_code=302)
+        return RedirectResponse(url="/?github=connected", status_code=302)
     return FileResponse(WEB / "index.html")
+
+
+def urllib_quote(value: str) -> str:
+    from urllib.parse import quote
+
+    return quote(value, safe="")
+
+
+@app.get("/auth/github/login")
+def github_login(request: Request):
+    if not github_oauth.oauth_configured():
+        raise HTTPException(status_code=400, detail="GitHub OAuth is not configured in .env")
+    state = secrets.token_urlsafe(24)
+    request.session["oauth_state"] = state
+    return RedirectResponse(url=github_oauth.authorize_url(state), status_code=302)
+
+
+@app.get("/auth/github/callback")
+def github_callback(request: Request, code: str | None = None, state: str | None = None, error: str | None = None):
+    """Alternate callback path if you change the OAuth App redirect URI later."""
+    return index(request, code=code, state=state, error=error)
+
+
+@app.post("/auth/github/logout")
+def github_logout(request: Request) -> dict:
+    github_oauth.clear_session(request.session)
+    return {"ok": True, "github": github_oauth.public_status(request.session)}
+
+
+@app.get("/api/github/status")
+def github_status(request: Request) -> dict:
+    return github_oauth.public_status(request.session)
+
+
+@app.get("/api/github/repos")
+def github_repos(request: Request, q: str = "", limit: int = 40) -> dict:
+    token = github_oauth.token_from_session(request.session)
+    if not token:
+        raise HTTPException(status_code=401, detail="Connect GitHub first.")
+    try:
+        repos = github_oauth.list_repos(token, limit=max(1, min(limit, 80)), query=q)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"repos": repos, "github": github_oauth.public_status(request.session)}
+
+
+@app.get("/api/github/pulls")
+def github_pulls(request: Request) -> dict:
+    token = github_oauth.token_from_session(request.session)
+    if not token:
+        raise HTTPException(status_code=401, detail="Connect GitHub first.")
+    from edl.github_pr import _repo_slug
+
+    slug = _repo_slug(engine.snapshot().get("origin") or {})
+    if not slug:
+        return {
+            "pulls": [],
+            "detail": "Analyze a GitHub repository first, then pick a pull request.",
+        }
+    owner, name = slug
+    try:
+        pulls = github_oauth.list_pulls(token, owner, name)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "pulls": pulls,
+        "repo": f"{owner}/{name}",
+        "detail": None if pulls else f"No open pull requests on {owner}/{name}.",
+    }
 
 
 @app.get("/api/health")
@@ -99,7 +192,7 @@ def health() -> dict:
 
 
 @app.get("/api/bootstrap")
-def bootstrap() -> dict:
+def bootstrap(request: Request) -> dict:
     snap = engine.snapshot()
     try:
         from edl.llm_agent import llm_settings
@@ -110,6 +203,7 @@ def bootstrap() -> dict:
     except Exception:
         snap["llm_ready"] = False
         snap["llm_model"] = None
+    snap["github"] = github_oauth.public_status(request.session)
     return snap
 
 
@@ -230,8 +324,15 @@ def notify(body: NotifyIn) -> dict:
     return {"notification": notify_owners(engine, record, send=body.send), "decision": record}
 
 
+class OpenDecisionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    change_id: str
+    mode: str = "full"
+    dry_run: bool = False
+
+
 @app.post("/api/github/pr-comment")
-def pr_comment(body: PrCommentIn) -> dict:
+def pr_comment(request: Request, body: PrCommentIn) -> dict:
     from edl.github_pr import post_decision_to_pr
 
     try:
@@ -246,9 +347,39 @@ def pr_comment(body: PrCommentIn) -> dict:
             pr_number=body.pr,
             create_check=body.check,
             dry_run=body.dry_run,
+            access_token=github_oauth.token_from_session(request.session),
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result.get("status") == "blocked":
+        raise HTTPException(status_code=400, detail=result.get("detail") or "Could not post the PR comment.")
+    return {"github": result, "decision": record}
+
+
+@app.post("/api/github/open-decision")
+def open_decision(request: Request, body: OpenDecisionIn) -> dict:
+    """Create a GitHub Issue + PR for the current decision when none exist."""
+    from edl.github_pr import open_decision_issue_and_pr
+
+    try:
+        payload = engine.review(body.change_id, body.mode)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"No change named {body.change_id}.") from exc
+    record = payload["runs"][body.mode]
+    try:
+        result = open_decision_issue_and_pr(
+            engine,
+            record,
+            dry_run=body.dry_run,
+            access_token=github_oauth.token_from_session(request.session),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result.get("status") == "blocked":
+        raise HTTPException(
+            status_code=400,
+            detail=result.get("detail") or "Could not open the GitHub issue/PR.",
+        )
     return {"github": result, "decision": record}
 
 

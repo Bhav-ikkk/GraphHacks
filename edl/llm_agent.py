@@ -90,6 +90,29 @@ def llm_settings() -> LlmSettings:
     )
 
 
+def llm_public_status() -> dict:
+    settings = llm_settings()
+    ready = bool(settings.remote)
+    return {
+        "llm_ready": ready,
+        "llm_model": settings.model if ready else None,
+        "llm_provider": settings.provider if ready else None,
+    }
+
+
+def _llm_timeout() -> int:
+    raw = os.environ.get("SYZYGY_LLM_TIMEOUT", "120").strip()
+    try:
+        return max(30, min(int(raw), 180))
+    except ValueError:
+        return 120
+
+
+def _is_timeout(exc: object) -> bool:
+    text = str(exc).lower()
+    return "timed out" in text or "timeout" in text or isinstance(exc, TimeoutError)
+
+
 def openai_tools() -> list[dict]:
     tools = []
     for spec in list_tools():
@@ -237,22 +260,29 @@ def chat_completion(
     }
     if with_tools:
         body["tools"] = openai_tools()
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode("utf-8"),
-        method="POST",
-    )
-    request.add_header("Content-Type", "application/json")
-    if settings.api_key:
-        request.add_header("Authorization", f"Bearer {settings.api_key}")
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:500]
-        raise RuntimeError(f"LLM HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"LLM request failed: {exc.reason}") from exc
+    encoded = json.dumps(body).encode("utf-8")
+    timeout = _llm_timeout()
+    last_error: Exception | None = None
+    for attempt in range(2):
+        request = urllib.request.Request(url, data=encoded, method="POST")
+        request.add_header("Content-Type", "application/json")
+        if settings.api_key:
+            request.add_header("Authorization", f"Bearer {settings.api_key}")
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+            raise RuntimeError(f"LLM HTTP {exc.code}: {detail}") from exc
+        except (TimeoutError, urllib.error.URLError) as exc:
+            last_error = exc
+            reason = getattr(exc, "reason", exc)
+            if attempt == 0 and _is_timeout(reason):
+                continue
+            raise RuntimeError(f"LLM request failed: {reason}") from exc
+    else:
+        raise RuntimeError(f"LLM request failed: {last_error}") from last_error
     choices = payload.get("choices") or []
     if not choices:
         raise RuntimeError("LLM response had no choices.")

@@ -589,7 +589,7 @@ def pr_comment_cmd(
 
 
 @app.command()
-def serve(port: int = 8000) -> None:
+def serve(port: int = 8001) -> None:
     """Start the Syzygy UI. Analyze a repo, scope files, run the decision."""
     import uvicorn
 

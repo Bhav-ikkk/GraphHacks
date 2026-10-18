@@ -39,7 +39,33 @@ CODE_MARKERS = ("Dockerfile", "dockerfile", "go.mod", "package.json", "pyproject
 COMPOSE_NAMES = {"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}
 SERVICE_ROOTS = {"services", "apps", "packages", "cmd"}
 CODEOWNERS_PATHS = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
-SOURCE_SUFFIXES = (".py", ".go", ".js", ".ts", ".tsx", ".jsx", ".proto")
+SOURCE_SUFFIXES = (
+    ".py",
+    ".go",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".java",
+    ".kt",
+    ".kts",
+    ".cs",
+    ".rb",
+    ".rs",
+    ".proto",
+)
+JAVA_METHOD = re.compile(
+    r"^(?:(?:public|protected|private|static|final|synchronized|native|abstract|default|strictfp)\s+)+"
+    r"(?:<[^>]+>\s+)?"
+    r"[\w.<>,\[\]?]+\s+"
+    r"([a-z]\w*)\s*\("
+)
+KOTLIN_FUN = re.compile(r"\bfun\s+(?:<[^>]+>\s+)?([A-Za-z_]\w*)\s*\(")
+CSHARP_METHOD = re.compile(
+    r"^(?:(?:public|protected|internal|private|static|async|virtual|override|sealed)\s+)+"
+    r"[\w.<>,\[\]?]+\s+"
+    r"([a-z]\w*)\s*\("
+)
 OBSERVED_AT = "2026-10-15T12:00:00Z"
 MAX_REMOTE_SOURCES = 80
 ROOT_SERVICE = "__repo__"
@@ -555,6 +581,10 @@ def _looks_like_test(path: str) -> bool:
         or name.endswith(".test.ts")
         or name.endswith(".spec.js")
         or name.endswith(".spec.ts")
+        or name.endswith("Test.java")
+        or name.endswith("Tests.java")
+        or name.endswith("Test.kt")
+        or name.endswith("Tests.kt")
     )
 
 
@@ -608,11 +638,39 @@ def _scan_functions(filename: str, text: str) -> list[str]:
                     if name and not name.startswith("_") and name not in found:
                         found.append(name)
                     break
+    elif filename.endswith(".java"):
+        for line in text.splitlines():
+            name = _first_match(JAVA_METHOD, line.strip())
+            if name and name not in found:
+                found.append(name)
+    elif filename.endswith((".kt", ".kts")):
+        for line in text.splitlines():
+            name = _first_match(KOTLIN_FUN, line.strip())
+            if name and name not in {"main", "invoke"} and name not in found:
+                found.append(name)
+    elif filename.endswith(".cs"):
+        for line in text.splitlines():
+            name = _first_match(CSHARP_METHOD, line.strip())
+            if name and name not in found:
+                found.append(name)
+    elif filename.endswith(".rb"):
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("def "):
+                continue
+            name = stripped[4:].split("(")[0].split(".")[-1].strip()
+            if name and not name.startswith("_") and name not in found:
+                found.append(name)
     elif filename.endswith(".proto"):
         for name in _proto_rpcs(text):
             if name not in found:
                 found.append(name)
-    return found[:8]
+    return found[:16]
+
+
+def _first_match(pattern: re.Pattern[str], text: str) -> str | None:
+    match = pattern.search(text)
+    return match.group(1) if match else None
 
 
 def _compose_from_text(text: str) -> dict[str, list[str]]:
@@ -789,7 +847,7 @@ def _github_functions(
     chosen: list[str] = []
     for paths_for_service in by_service.values():
         paths_for_service.sort(key=_source_rank)
-        chosen.extend(paths_for_service[:3])
+        chosen.extend(paths_for_service[:8])
     chosen = chosen[:MAX_REMOTE_SOURCES]
 
     def read_one(path: str) -> tuple[str, list[str]]:

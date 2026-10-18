@@ -83,6 +83,26 @@ def live_reader() -> FalkorReader:
     return FalkorReader(_live["selected"])
 
 
+def reconnect():
+    """Open a fresh FalkorDB handle after a dropped Redis socket."""
+    if not is_ready():
+        raise RuntimeError("FalkorDB is not ready. Publish a graph before reading.")
+    settings = falkor_settings()
+    via = _state.get("via")
+    if via == "browser" and settings.browser:
+        remote = _connect_browser(settings)
+    else:
+        remote = _connect(settings)
+    selected = remote.select_graph(settings.graph)
+    _live.update(selected=selected, graph_name=settings.graph)
+    return selected
+
+
+def is_timeout(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "timed out" in text or "timeout" in text or "read operation" in text
+
+
 def status() -> dict[str, Any]:
     settings = falkor_settings()
     return {
@@ -459,8 +479,8 @@ def _connect(settings: FalkorSettings):
         port=settings.port,
         username=settings.username or None,
         password=settings.password or None,
-        socket_connect_timeout=5,
-        socket_timeout=20,
+        socket_connect_timeout=10,
+        socket_timeout=60,
     )
 
 

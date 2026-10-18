@@ -359,66 +359,95 @@ class Engine:
         )
 
     def graph_preview(self) -> dict:
-        """Compact service/owner map for the UI canvas before a decision runs."""
-        seen: set[str] = set()
-        nodes: list[dict] = []
-        edges: list[dict] = []
+        """FalkorDB-style subgraph for the live canvas: services, functions, calls, owners."""
+        role_for = {
+            "Service": "dependency",
+            "Function": "consumer",
+            "Team": "owner",
+            "Incident": "incident",
+            "Test": "fix",
+            "Change": "changed",
+        }
+        keep: set[str] = set()
+        for label in ("Service", "Team", "Incident"):
+            for node in self.graph.by_label(label):
+                if node.get("name") == "__repo__":
+                    continue
+                keep.add(node["id"])
 
-        def add_node(node: dict | None, role: str) -> None:
-            if not node or node["id"] in seen:
-                return
-            if node.get("name") == "__repo__":
-                return
-            seen.add(node["id"])
+        functions = [
+            node
+            for node in self.graph.by_label("Function")
+            if node.get("name") not in {None, "__repo__"}
+        ]
+        named = [node for node in functions if node.get("granularity") != "service"]
+        functions = named or functions
+        degree: dict[str, int] = {node["id"]: 0 for node in functions}
+        for edge in self.graph.edges:
+            if edge.get("rel") != "CALLS":
+                continue
+            if edge["src"] in degree:
+                degree[edge["src"]] += 1
+            if edge["dst"] in degree:
+                degree[edge["dst"]] += 1
+        ranked = sorted(
+            functions,
+            key=lambda node: (-degree.get(node["id"], 0), node.get("service") or "", node["id"]),
+        )
+        budget = max(0, 100 - len(keep))
+        for node in ranked[:budget]:
+            keep.add(node["id"])
+
+        for node in self.graph.by_label("Test"):
+            if len(keep) >= 140:
+                break
+            for edge in self.graph.edges_from(node["id"], "COVERS"):
+                if edge["dst"] in keep:
+                    keep.add(node["id"])
+                    break
+
+        nodes = []
+        for node_id in keep:
+            node = self.graph.node(node_id)
+            if not node:
+                continue
+            kind = node.get("label") or "node"
             nodes.append(
                 {
-                    "id": node["id"],
-                    "label": node.get("name") or node["id"],
-                    "role": role,
+                    "id": node_id,
+                    "label": node.get("name") or node_id,
+                    "role": role_for.get(kind, "dependency"),
+                    "kind": kind.lower(),
                 }
             )
 
-        for service in self.graph.by_label("Service"):
-            add_node(service, "dependency")
-            for edge in self.graph.edges_from(service["id"], "DEPENDS_ON"):
-                other = self.graph.node(edge["dst"])
-                add_node(other, "consumer")
-                edges.append(
-                    {
-                        "source": edge["src"],
-                        "target": edge["dst"],
-                        "label": "DEPENDS_ON",
-                    }
-                )
-            for edge in self.graph.edges_to(service["id"], "OWNS"):
-                team = self.graph.node(edge["src"])
-                add_node(team, "owner")
-                edges.append(
-                    {
-                        "source": edge["src"],
-                        "target": edge["dst"],
-                        "label": "OWNS",
-                    }
-                )
-            for edge in self.graph.edges_to(service["id"], "AFFECTED"):
-                incident = self.graph.node(edge["src"])
-                add_node(incident, "incident")
-                edges.append(
-                    {
-                        "source": edge["src"],
-                        "target": edge["dst"],
-                        "label": "AFFECTED",
-                    }
-                )
+        edges = []
+        seen_edge: set[tuple[str, str, str]] = set()
+        for edge in self.graph.edges:
+            rel = edge.get("rel") or "RELATED"
+            if rel not in {"PART_OF", "CALLS", "DEPENDS_ON", "OWNS", "AFFECTED", "COVERS"}:
+                continue
+            src, dst = edge["src"], edge["dst"]
+            if src not in keep or dst not in keep:
+                continue
+            key = (src, rel, dst)
+            if key in seen_edge:
+                continue
+            seen_edge.add(key)
+            edges.append({"source": src, "target": dst, "label": rel})
         return {"nodes": nodes, "edges": edges, "kind": "preview"}
 
     def snapshot(self) -> dict:
         nodes, edges = self.graph.counts()
         remote = falkor.status()
+        llm = _llm_snapshot()
         return {
             "backend": falkor.backend_label(),
             "falkor": remote,
             "graph_ready": falkor.is_ready() or allow_memory_graph(),
+            "llm_ready": llm["llm_ready"],
+            "llm_model": llm["llm_model"],
+            "llm_provider": llm.get("llm_provider"),
             "dataset": self.dataset,
             "origin": self.origin,
             "note": self.note,
@@ -433,6 +462,15 @@ class Engine:
             "graph_preview": self.graph_preview() if self.dataset == "repository" else None,
             "modes": list(MODES),
         }
+
+
+def _llm_snapshot() -> dict:
+    try:
+        from edl.llm_agent import llm_public_status
+
+        return llm_public_status()
+    except Exception:
+        return {"llm_ready": False, "llm_model": None, "llm_provider": None}
 
 
 def _public_change(change: dict) -> dict:

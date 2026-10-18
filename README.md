@@ -78,33 +78,34 @@ Syzygy EDL operates across three coordinated layers:
 
 ```mermaid
 flowchart TB
-    subgraph Ingestion ["1. Multi-Modal Ingestion Engine"]
-        A[Git Diff / Source AST] --> I[edl.ingest]
-        B[Docker Compose / Deps] --> I
-        C[GitHub Actions CI API] --> I
-        D[CODEOWNERS / Teams] --> I
-        E[Operational Evidence YAML] --> I
+    subgraph Ingestion["1. Multi-Modal Ingestion Engine"]
+        A["Git Diff / Source AST"] --> I["edl.ingest Core"]
+        B["Docker Compose / Deps"] --> I
+        C["GitHub Actions CI API"] --> I
+        D["CODEOWNERS / Teams"] --> I
+        E["Operational Evidence YAML"] --> I
     end
 
-    subgraph FalkorDBEngine ["2. FalkorDB Enterprise Graph Backbone"]
-        I -->|Publish Graph| F[(FalkorDB Server<br/>GraphBLAS Engine)]
-        F <-->|Parameterized Cypher| R[FalkorReader Client]
-        F <-->|Live Visual Studio| FS[FalkorDB Browser<br/>Port 3000]
+    subgraph FalkorDBEngine["2. FalkorDB Enterprise Graph Backbone"]
+        I -->|"Publish Graph"| F[("FalkorDB Server (GraphBLAS Engine)")]
+        R["FalkorReader Client"] -->|"GRAPH.QUERY"| F
+        F -->|"Cypher Records"| R
+        FS["FalkorDB Browser (Port 3000)"] -->|"Visual Inspection"| F
     end
 
-    subgraph Governance ["3. Decision Layer & Governance"]
-        R --> T[Named Graph Tools]
-        T --> AG[LLM Agent / Gemini 2.5]
-        T --> POL[Deterministic Policy Engine]
-        POL --> GATE{Fail-Closed Gate}
-        GATE -->|HOLD / REVIEW / INSUFFICIENT| BLK[Block Actions & PR Gate]
-        GATE -->|PROCEED / GUARDS| ACT[Allow PR Comment / Check Run]
+    subgraph Governance["3. Decision Layer & Governance"]
+        R --> T["Named Graph Tools"]
+        T --> AG["LLM Agent / Gemini 2.5"]
+        T --> POL["Deterministic Policy Engine"]
+        POL --> GATE{"Fail-Closed Gate"}
+        GATE -->|"HOLD / REVIEW / INSUFFICIENT"| BLK["Block Actions & PR Gate"]
+        GATE -->|"PROCEED / GUARDS"| ACT["Allow PR Comment / Check Run"]
     end
 
-    subgraph Interface ["4. Developer Interfaces"]
-        F -.->|Canvas Stream| UI[Apple Sequoia 3-Pane UI<br/>@falkordb/canvas]
-        T -.->|Stdio JSON-RPC| MCP[MCP Server<br/>Cursor / VS Code]
-        GATE -.->|Webhook / Check Runs| GH[GitHub PR Bot]
+    subgraph Interface["4. Developer Interfaces"]
+        F -.->|"Canvas Stream"| UI["Apple Sequoia 3-Pane UI (@falkordb/canvas)"]
+        T -.->|"Stdio JSON-RPC"| MCP["MCP Server (Cursor / VS Code)"]
+        GATE -.->|"Webhook / Check Runs"| GH["GitHub PR Bot"]
     end
 ```
 
@@ -131,53 +132,16 @@ Rather than using generic D3 or Vis.js canvas renderers, Syzygy EDL integrates t
 The graph ontology models 14 distinct node labels and 16 directional relationship types:
 
 ```mermaid
-classDiagram
-    class Repository {
-        string url
-        string default_branch
-    }
-    class Service {
-        string id
-        string name
-        int tier
-        string owner
-    }
-    class Function {
-        string id
-        string name
-        int callers
-    }
-    class Test {
-        string id
-        string status
-        float duration
-    }
-    class Incident {
-        string id
-        string severity
-        string status
-        datetime created_at
-    }
-    class Owner {
-        string id
-        string handle
-        string type
-    }
-    class Change {
-        string id
-        string files
-        string symbols
-    }
-
-    Repository --> Service : IN_REPO
-    Service --> Function : PART_OF
-    Function --> Function : CALLS
-    Test --> Function : COVERS
-    Service --> Service : DEPENDS_ON
-    Owner --> Service : OWNS
-    Incident --> Service : AFFECTED
-    Change --> Function : MODIFIES
-    Change --> Service : TOUCHES
+flowchart LR
+    Repo["Repository"] -->|"IN_REPO"| Svc["Service"]
+    Svc -->|"PART_OF"| Fn["Function"]
+    Fn -->|"CALLS"| Fn
+    Tst["Test"] -->|"COVERS"| Fn
+    Svc -->|"DEPENDS_ON"| Svc
+    Own["Owner"] -->|"OWNS"| Svc
+    Inc["Incident"] -->|"AFFECTED"| Svc
+    Chg["Change"] -->|"MODIFIES"| Fn
+    Chg -->|"TOUCHES"| Svc
 ```
 
 #### Node Labels (14):
